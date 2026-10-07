@@ -45,9 +45,8 @@ def fake_get_patient_history(context: AgentContext, args: c.PatientHistoryInput)
 
 def fake_search_evidence(context: AgentContext, args: c.EvidenceSearchInput) -> c.EvidencePackage:
     return c.EvidencePackage(query=args.query, evidence=[c.EvidenceItem(
-        evidence_type="new_research", paper_id=UUID("00000000-0000-0000-0000-000000000004"),
-        external_id="FAKE-PMID", title="[FAKE] Dementia sleep orchestration fixture",
-        journal="Fake Journal", doi="FAKE-DOI", published_date=date(2025, 8, 1),
+        evidence_type="new_research", pmid="FAKE-PMID", title="[FAKE] Dementia sleep orchestration fixture",
+        journal="Fake Journal", doi="FAKE-DOI", publication_year=2025, full_text_available=False,
         study_type="systematic_review", relevance_score=0.94,
         ai_summary="[FAKE] 수면 변화 관련 합성 근거", abstract="Fake abstract; not clinical evidence",
     )][:args.top_k])

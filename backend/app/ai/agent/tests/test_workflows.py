@@ -66,7 +66,9 @@ class WorkflowTests(unittest.TestCase):
         ])
         data = envelopes(client)[1]["data"]
         self.assertEqual(data["query"], "sleep disturbance")
-        self.assertEqual(data["evidence"][0]["external_id"], "FAKE-PMID")
+        self.assertEqual(data["evidence"][0]["pmid"], "FAKE-PMID")
+        self.assertEqual(data["evidence"][0]["publication_year"], 2025)
+        self.assertFalse(data["evidence"][0]["full_text_available"])
         evidence = [m for m in client.requests[-1][0] if m.kind == "evidence"]
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0].role, "user")

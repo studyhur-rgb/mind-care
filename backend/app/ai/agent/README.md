@@ -95,8 +95,12 @@ unflagged일 때 none + 빈 규칙을 요구한다. 임상 규칙/등급은 추�
 
 `EvidenceItem`: 필수 `evidence_type: new_research/guideline`, `title: str`,
 `relevance_score: float (-1..1, 기존 코사인 점수 범위)`.
-선택 필드: `paper_id: UUID`, `external_id`, `journal`, `doi`, `organization`, `source_url`,
-`published_date: date`, `study_type`, `ai_summary`, `abstract`.
+선택 필드: `pmid: str | None`, `publication_year: int | None`, `study_type`, `ai_summary`,
+`abstract`, `journal`, `doi`, `organization`, `source_url` (기본 null).
+`full_text_available: bool`은 기본 false다. `query` + `evidence` 묶음과 각 필드의 타입/기본값은
+`app.ai.retrieval.search.EvidencePackage`의 직렬화 형식과 일치한다.
+DB 내부 `paper_id`/`external_id`/`published_date`는 이 RAG 경계에서 받지 않는다.
+Agent의 extra 금지 및 유한 코사인 점수 범위 검증은 유지한다.
 선택 필드는 반환하지 않은 정보를 추측해서 채우지 않는다.
 
 예시의 `age/sex/cognitive_status`는 현재 환자 스키마에 없으므로 추가하지 않았다.
@@ -229,8 +233,10 @@ Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 �
 | 안전 검사 | 담당자가 승인한 규칙 세트/버전, 실제 level enum/의료적 의미 |
 
 기존 `search_similar(embedding, top_k, model_name)`는 UUID+score만 반환하고,
-`get_papers_by_ids(paper_ids)`는 논문 상세를 반환한다. RAG 담당이 이 둘을 사용할 수 있지만
-query→embedding 서비스가 현재 없으므로 `search_evidence`의 완성된 backing 함수가 아니다.
-누락 ID는 `paper_id`로 매칭해야 하며 리스트 위치만으로 점수를 결합하면 안 된다.
+`get_papers_by_ids(paper_ids)`는 논문 상세를 반환한다. 현재 `app.ai.retrieval.search.search`
+구현이 query embedding과 검색/상세 조회를 제공하지만 Agent의 운영 Handler에는 연결하지 않았다.
+다음 Adapter에서 `top_k` → `k`, Context 전달 정책과 Agent EvidencePackage 변환을 처리한다.
+내부 누락 ID는 `paper_id`로 매칭해야 하며 리스트 위치만으로 점수를 결합하면 안 된다.
+RAG의 `evidence_type="new_research"` 고정과 full_text_available 기본 false는 이번에 변경하지 않았다.
 `save_summary(AnalysisIn)`는 논문 분석 저장이므로 돌봄 기록 annotation 저장에 재사용하지 않는다.
 실제 RAG와 DB 계약/공용 스키마를 이번 작업에서 수정하거나 새로 가정하지 않았다.

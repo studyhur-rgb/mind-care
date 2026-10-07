@@ -123,19 +123,19 @@ class EvidenceSearchInput(AgentModel):
 
 class EvidenceItem(AgentModel):
     evidence_type: Literal["new_research", "guideline"]
-    paper_id: UUID | None = None
-    external_id: str | None = None
+    pmid: str | None = None
     title: str
-    journal: str | None = None
-    doi: str | None = None
-    organization: str | None = None
-    source_url: str | None = None
-    published_date: date | None = None
+    publication_year: int | None = None
     study_type: str | None = None
     # search_similar는 코사인 유사도 [-1, 1]을 반환한다.
     relevance_score: float = Field(ge=-1, le=1)
     ai_summary: str | None = None
     abstract: str | None = None
+    full_text_available: bool = False
+    journal: str | None = None
+    doi: str | None = None
+    organization: str | None = None
+    source_url: str | None = None
 
 
 class EvidencePackage(AgentModel):
