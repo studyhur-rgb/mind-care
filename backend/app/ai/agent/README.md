@@ -42,6 +42,7 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 | 파일 (agent/ 기준) | 역할 |
 |---|---|
 | `schemas.py` | Context, ToolCall, ModelTurn, Message, State, Result, 오류/메타데이터 trace |
+| `outputs.py` | 최종 Chat/Feed V1, Paper Detail 보조 콘텐츠, 근거 참조 검증, 선택적 결과 wrapper |
 | `tools/contracts.py` | 6개 Tool의 입력/출력 Pydantic 모델, EvidencePackage |
 | `registry.py` | ToolName/ToolContract 단일 출처, JSON Schema 생성, ToolSpec/Registry, 빈 운영 Registry |
 | `executor.py` | 입력/출력 검증, Handler 실행, JSON 직렬화, 안전한 오류/메타데이터 로그 |
@@ -54,6 +55,8 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 | `testing/fake_tools.py` | 고정 합성 fixture 기반 6개 Fake Handler/테스트 Registry |
 | `testing/fake_llm.py` | 정해진 ModelTurn 순서와 요청 snapshot을 사용하는 FakeLLMClient |
 | `testing/demo.py` | 최근 기록 → 근거 조회 → 최종 응답의 Fake 데모 |
+| `testing/structured_demo.py` | 같은 Tool Loop로 실행하는 Chat/Feed V1 오프라인 예시 |
+| `tests/test_outputs.py` | V1 경계/버전/참조/구조화 실행/legacy 호환성 검증 |
 | `tests/test_workflows.py` | A–D 워크플로, 오류, 경계/Builder 교체/Fake 계약 검증 |
 | `tests/test_openai_client.py` | 네트워크 없이 실제 SDK 메시지 형식/오류 검증 |
 | `tests/test_provider_integration.py` | 명시적 opt-in으로만 실행하는 외부 Provider 테스트 |
@@ -240,3 +243,132 @@ Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 �
 RAG의 `evidence_type="new_research"` 고정과 full_text_available 기본 false는 이번에 변경하지 않았다.
 `save_summary(AnalysisIn)`는 논문 분석 저장이므로 돌봄 기록 annotation 저장에 재사용하지 않는다.
 실제 RAG와 DB 계약/공용 스키마를 이번 작업에서 수정하거나 새로 가정하지 않았다.
+
+## 최종 답변 Structured Output V1 (선택적)
+
+`engine.run(user_input, context)`는 기존 `AgentResult` 및 문자열 `final_answer`를 그대로
+반환한다. 기존 결과 JSON에 새 필드가 추가되지 않는다. FakeLLM/LLMClient의
+`generate(messages, tools) -> ModelTurn`도 그대로다.
+
+```python
+from app.ai.agent.outputs import ChatAnswerV1, FeedAnswerV1
+
+chat = engine.run_structured(user_input, context, output_model=ChatAnswerV1)
+feed = engine.run_structured(user_input, context, output_model=FeedAnswerV1)
+```
+
+`run_structured()`만 서버가 선택한 최종 JSON Schema/콘텐츠 정책을 system message로
+추가한다. 기존 PromptBuilder 교체 지점과 Tool 호출/실행/재판단 루프는 유지한다.
+구조화 정책은 첫 user message 직전에 삽입하며 Builder의 기존 메시지 순서는 보존한다.
+기본 순서는 system 정책 → system Context → system 구조화 정책 → user 원문이다.
+Structured 모드에서는 `build_final_response_context()`의 aggregate evidence copy를 생략한다.
+call ID가 있는 원래 Tool Result의 전체 EvidencePackage가 재판단/최종 생성에 계속 전달된다.
+legacy `run()`은 기존 aggregate evidence message와 Builder 호출 동작을 유지한다.
+Tool Call이 없는 마지막 `ModelTurn.text`를 단일 JSON object로 검증한다.
+Provider native response_format/strict schema 기능은 연결하지 않았다. 모델이 프롬프트를
+따르지 않으면 서버 검증에서 거부한다. 자동 JSON 수정/markdown 추출/재요청은 하지 않는다.
+
+반환 `StructuredAgentResult`는 `execution: AgentResult`, `output: ChatAnswerV1 | FeedAnswerV1 | None`,
+`sources: list[ResolvedEvidence]`의 별도 wrapper다. Chat 성공 시 `execution.final_answer`는
+검증된 `output.answer`에서만 파생한다. Feed 성공 시 `execution.final_answer=None`이며,
+JSON을 문자열 답변에 넣지 않는다. 실패 시 output=None, sources=[], final_answer=None이다.
+참조/JSON/콘텐츠 계약 위반은 `invalid_response` + `invalid_structured_output`으로 반환하고,
+원문/검증 상세를 오류에 노출하지 않는다. 최종 검증도 기존 전체 request deadline에 포함된다.
+Tool 오류 후 참조 없는 Chat 설명은 가능하며, `completed`는 의료적 정확성 보장이 아니다.
+
+### 콘텐츠 모델과 제한
+
+모든 아래 모델은 `AgentModel`의 extra 금지/비유한 수 금지 정책을 상속한다.
+콘텐츠 문자열은 strict string이며 빈 문자열/공백만 있는 문자열을 거부하고 원문을 보존한다.
+`schema_version`과 `response_type`은 기본값 없이 명시적으로 제출해야 한다.
+
+| 모델 | 필드 및 제한 |
+|---|---|
+| `EvidenceReference` | `tool_call_id`: 1..256자, `evidence_index`: strict int >=0, 0-based |
+| `ChatAnswerV1` | `schema_version="1"`, `response_type="chat"`, `answer`: 1..12,000자, `citation_refs`: 0..20개 고유 참조 |
+| `FeedContentItemV1` | `source_ref`, `headline`: 1..200자, `summary_bullets`: 1..5개/각 1..500자, `personal_reason`: 1..1,000자, `category`: 단일 treatment/care/prevention/diagnosis |
+| `FeedAnswerV1` | `schema_version="1"`, `response_type="feed"`, `items`: 0..5개, 동일 source_ref 중복 금지 |
+| `PaperParagraphV1` | `text`: 1..2,000자 |
+| `PaperBodyV1` | `easy`, `detail`: 각각 1..10개 PaperParagraphV1 |
+| `GlossaryEntryV1` | `term`: 1..100자, `meaning`: 1..500자 |
+| `PaperDetailContentV1` | `schema_version="1"`, `response_type="paper_detail"`, `source_ref`, summary_bullets(Feed와 동일), body, `personal_meaning`: null 또는 1..2,000자, `limitations`: 0..5개/각 1..500자, `glossary`: 0..10개 |
+
+빈 Feed는 검색/필터링 후 결과가 없거나 개인화 근거가 부족한 정상 콘텐츠다.
+정확히 5개를 강제하거나 없는 근거를 채우지 않는다. 순위는 생성된 items 순서이며,
+최신성/Top-K 선택 정책 자체를 구현하거나 검증한 것은 아니다.
+최종 Chat/Feed JSON 문자열은 파싱 전에 65,536자로 제한한다. 중복 JSON key,
+NaN/Infinity, 잘못된 version/type, metadata/미래 V2 필드도 거부한다.
+
+Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 계약만 추가했다.
+독립 실행 모델로 `run_structured()`에 전달할 수 없고 Workflow/API/저장은 없다.
+개인화 Context가 없을 때 personal_meaning은 명시적으로 null이다. 문단별 citation 번호는
+생성하지 않는다. 전체 콘텐츠의 source_ref만 검증하며 문단별 인용은 후속 별도 계약이다.
+`body.easy/detail`은 현재 화면의 읽기 난이도와 맞춘 필드이며 미래의 `easy_summary`가 아니다.
+현재 상세 화면의 복수형 `limitations`도 미래 3분할의 단수형 `limitation`과 별개다.
+
+### 출처 참조 검증과 서버 조립 경계
+
+Orchestrator는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
+요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 Tool Result payload는 바꾸지 않는다.
+모델은 role=tool message의 tool_call_id와 data.evidence 위치를 참조한다.
+`resolve_evidence_references(output, evidence_by_call)`는 output을 다시 검증하고,
+현재 요청의 성공 검색 존재/0-based index 범위를 검사한다. 실패한 검색/다른 Tool/다른 요청의
+ID/없는 근거를 인용할 수 없다. helper를 직접 쓸 때도 성공 검색 snapshot만 제공해야 한다.
+이 검증은 의료적 함의, 환자 사실, 인용 문장과 논문 내용의 일치까지 증명하지 않는다.
+
+서버용 `ResolvedEvidence`는 source_ref와 실제 evidence_type/title/pmid/doi/journal/
+publication_year/study_type/organization/source_url/full_text_available만 원본에서 복사한다.
+없던 metadata는 null 그대로 유지하고 abstract/ai_summary/전체 환자 기록은 반환하지 않는다.
+LLM이 이 metadata를 반환하는 schema는 없다. 이 클래스와 StructuredAgentResult는 서버용이며
+LLM 최종 출력 모델은 ChatAnswerV1/FeedAnswerV1뿐이다.
+
+| AI 콘텐츠 | 현재 Frontend 매핑 | 신뢰 가능한 서버 조립 |
+|---|---|---|
+| Chat `answer` | ChatMessage.text | message id/role은 Backend가 생성 |
+| Chat `citation_refs` | ChatMessage.citations의 별도 출처 영역 | 서버가 원본 title/source_url/type을 조립. 표시 번호는 UI/Assembler 책임이며 answer 안 번호와 연결하지 않음. evidence_level mapping은 미확정 |
+| Feed `headline` | FeedItem.title | AI 헤드라인과 원본 논문 title을 구분 |
+| Feed `summary_bullets` | FeedItem.summary_bullets | 그대로 |
+| Feed `personal_reason` | FeedItem.personal_reason | 실제 제공된 patient/care context와 근거에 한정 |
+| Feed `category` | FeedItem.category | 단일 category 유지 |
+| Feed `source_ref` | metadata lookup | id/journal/published_at/evidence_level/read_minutes/is_bookmarked는 LLM 생성 금지 |
+| Paper `summary_bullets/body/personal_meaning/limitations/glossary` | PaperDetail의 같은 필드 | body 문단은 text만 제공; nullable personal_meaning 표시 정책은 별도 |
+| Paper `source_ref` | metadata lookup | id/원 제목/journal/date/authors/DOI/pubmed_url/study_type/evidence_level은 신뢰 가능한 source에서 조립 |
+
+Assembler/Frontend DTO 생성은 구현하지 않았다. 현재 RAG는 DB paper UUID, authors,
+정확한 published_at 날짜, evidence_level을 반환하지 않는다. publication_year만으로 날짜를
+만들거나 PMID를 UUID로 간주하지 않는다. 현재 Frontend의 필수 metadata를 모두 채울 수는
+없으며, 누락 표현 및 DB ID 매핑은 후속 합의가 필요하다. Citation source_url이 null인 경우도
+가짜 URL을 생성하지 않는다. Structured Chat의 answer에는 inline 인용 번호를 생성하지
+않도록 안내하며, citation_refs만 authoritative 출처 연결로 사용한다. 기존 mock의 [1] 같은
+본문 표기를 근거로 서버가 번호를 신뢰하지 않는다. 모델이 정책을 무시하고 번호를 출력해도
+일반 answer 문자열일 뿐 출처 연결로 해석하지 않는다. 별도 marker validator는 도입하지 않았다.
+
+정책은 relevance_score를 검색 유사도로만 사용하고 근거 등급/의학적 확신도로 해석하지 않는다.
+근거 없는 인용·환자 사실·개인화 설명을 만들지 않고, 빈 검색을 효과 없음/안전함으로 해석하지
+않도록 안내한다. new_research와 guideline을 구분하고, 현재 1..6 → A/B/C/D/guideline의
+미확정 변환을 LLM이 결정하지 않게 한다. disclaimer는 현재 UI 고정 책임이다.
+
+### V2 확장 및 남은 합의
+
+V1에는 easy_summary/finding/comparison/limitation/복수 category를 넣지 않았다.
+팀 합의 후 FeedAnswerV2/PaperDetailContentV2와 명시적 schema_version="2"를 정의하고,
+서버가 허용 버전을 선택하며 소비자도 해당 버전을 지원하도록 한다. extra 금지인 V1에
+필드를 조용히 추가하거나 V2 payload를 V1로 강제 파싱하지 않는다.
+paper_analysis의 summary_finding/summary_comparison/summary_limitation은 그대로이며,
+easy_summary migration이나 새 dependency는 없다.
+
+다음 Tool Contract 구체화는 진행할 수 있다. 실제 연결 전에는 개인화 Context 출처,
+등급 변환, metadata 누락 정책/ID 매핑, 순위·최신성 기준, 문장 수준 근거 검증,
+Paper Detail 문단별 인용, nullable 개인화 UI 처리가 추가 합의 대상이다.
+production Registry는 계속 비어 있고 Provider native schema 연동도 후속 선택 사항이다.
+
+오프라인 검증 (`backend/`; live Provider test를 명시적으로 끈다):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s app/ai/agent/tests -t . -v
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s . -t . -v
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.ai.agent.testing.demo
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.ai.agent.testing.structured_demo
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c 'import app.ai.agent.orchestrator; import app.ai.agent.outputs; import app.ai.retrieval.search; import app.ai.retrieval.evidence'
+git diff --check
+```
