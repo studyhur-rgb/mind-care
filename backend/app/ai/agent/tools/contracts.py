@@ -63,7 +63,9 @@ class CareLogItem(AgentModel):
 
 class RecentCareLogsOutput(AgentModel):
     period: RecentCareLogsPeriod
-    logs: list[CareLogItem]
+    logs: list[CareLogItem] = Field(
+        max_length=30, description="input.limit의 계약상 최대값에 따른 절대 상한 30개. 현재 호출의 실제 limit 준수는 Handler 책임이다."
+    )
     total_count: StrictInt = Field(
         ge=0, description="동일한 권한/사용자/환자/patient_care/기간 조건의 전체 row 수(limit 적용 전)."
     )

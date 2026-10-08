@@ -138,6 +138,12 @@ class RecentCareLogsContractTests(TestCase):
         # Output 모델은 input.limit를 알지 못하며 기본 limit를 추측하지 않는다.
         self.assertEqual(len(self.output([START] * 11).logs), 11)
 
+    def test_logs_absolute_maximum(self):
+        self.assertEqual(len(self.output([START] * 30, total=30).logs), 30)
+        with self.assertRaises(ValidationError):
+            self.output([START] * 31, total=31)
+        self.assertEqual(c.RecentCareLogsOutput.model_json_schema()["properties"]["logs"]["maxItems"], 30)
+
     def test_total_count_is_nonnegative_strict_integer(self):
         for total in (-1, True, "0", 1.5):
             with self.subTest(total=total), self.assertRaises(ValidationError):

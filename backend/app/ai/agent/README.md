@@ -182,11 +182,24 @@ LLM-visible input은 `days`와 `limit`뿐이다. 두 값은 strict integer이며
 위장하지 않는다. DB query, 권한 적용, timeout/cancellation 및 production 연결은 후속 책임이다.
 
 `end_at`은 Handler가 요청당 한 번 결정한 조회 종료 시각이고,
-`start_at = end_at - timedelta(days=args.days)`다. 달력 날짜 N개가 아닌 최근 **N×24시간
+UTC 기준으로 `start_at = end_at - timedelta(days=args.days)`다. 달력 날짜 N개가 아닌 최근 **N×24시간
 rolling window**이며 DST 등에서도 UTC instant 기준으로 N×24시간을 뺀다.
 조회 범위는 `start_at <= logged_at < end_at`(start inclusive / end exclusive)이고
 `start_at < end_at`이어야 한다. 모든 시각은 timezone-aware이며 offset이 달라도 실제 instant로
 비교한다. `logged_at`은 DB의 기록 시각이며 content가 서술하는 사건/증상의 발생 시각으로 추론하지 않는다.
+
+향후 Real Handler는 종료 시각을 timezone-aware instant로 결정하고, duration 계산 전에 UTC로 정규화한다.
+
+```python
+end_utc = end_at.astimezone(timezone.utc)
+start_utc = end_utc - timedelta(hours=24 * args.days)
+```
+
+DB의 `TIMESTAMPTZ` 조회 경계도 instant 기준의 `start_utc <= logged_at < end_utc`로 적용한다.
+local wall-clock timezone datetime에 직접 `timedelta(days=...)`를 적용하는 계산에 의존하지 않는다.
+DST spring-forward/fall-back에서도 실제 elapsed duration은 항상 `days × 24시간`이어야 한다.
+이는 후속 구현 규칙이며 현재 Real Handler는 없다. 향후 Handler 테스트에서는 두 DST 전환 모두
+`days=1`의 UTC elapsed가 정확히 24시간인지 확인한다.
 
 출력은 `period`, `logs`, `total_count`뿐이다. `period`는 `start_at`, `end_at`만,
 각 `CareLogItem`은 `logged_at`, `content`, `mood_tag`만 포함한다. 환자/사용자/간병인 ID와
@@ -199,7 +212,8 @@ rolling window**이며 DST 등에서도 UTC instant 기준으로 N×24시간을 
 Handler는 `0 <= len(logs) <= limit`, `len(logs) <= total_count`를 유지해야 하며 일관된
 DB snapshot에서는 보통 `len(logs) == min(limit, total_count)`다. count와 목록의 snapshot
 일관성 확보는 Real Handler 책임이다. Output validator는 input.limit를 알지 못하므로
-이를 추측하지 않고 count 하한, 기간 포함 여부, 최신순만 검증한다.
+이를 추측하지 않는다. 다만 어떤 유효한 V1 input에서도 31개 이상을 반환할 수 없으므로
+Output schema는 `logs`의 절대 최대 길이 30을 강제하며, count 하한, 기간 포함 여부, 최신순도 검증한다.
 
 데이터 출처와 임상적 의미는 다음처럼 구분한다.
 
