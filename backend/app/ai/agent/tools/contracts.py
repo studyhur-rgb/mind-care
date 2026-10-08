@@ -3,7 +3,7 @@ from datetime import date
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, JsonValue, StrictBool, StrictInt, model_validator
+from pydantic import AwareDatetime, Field, JsonValue, StrictBool, StrictInt, field_validator, model_validator
 
 from ..schemas import AgentModel
 
@@ -117,25 +117,41 @@ class PatientHistoryOutput(AgentModel):
 
 
 class EvidenceSearchInput(AgentModel):
-    query: str = Field(min_length=1, max_length=2000)
-    top_k: StrictInt = Field(default=5, ge=1, le=20)
+    query: str = Field(min_length=1, max_length=2000, description=(
+        "연구 근거 검색용 query. 사용자 원문 또는 검색 목적에 맞게 재구성한 질문을 허용한다. "
+        "필요한 임상/돌봄 맥락은 포함할 수 있으나 검색에 불필요한 직접 식별정보(UUID, 이름, 전화번호, 주소 등)는 포함하지 않는다. "
+        "whitespace-only는 거부하며 nonblank 원문은 그대로 보존한다."
+    ))
+    top_k: StrictInt = Field(default=5, ge=1, le=20, description=(
+        "최대 반환 개수. 필터링이나 상세 데이터 누락으로 실제 결과는 더 적거나 0개일 수 있다."
+    ))
+
+    @field_validator("query")
+    @classmethod
+    def reject_blank_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Evidence search query must not be blank")
+        return value
 
 
 class EvidenceItem(AgentModel):
     evidence_type: Literal["new_research", "guideline"]
-    pmid: str | None = None
+    pmid: str | None = Field(default=None, description="RAG가 제공한 PMID. 없으면 null이며 추정하지 않는다.")
     title: str
     publication_year: int | None = None
     study_type: str | None = None
     # search_similar는 코사인 유사도 [-1, 1]을 반환한다.
-    relevance_score: float = Field(ge=-1, le=1)
+    relevance_score: float = Field(ge=-1, le=1, description=(
+        "BGE-M3 + cosine-similarity 기반 retrieval score [-1, 1]. "
+        "논문 품질, evidence level, 의료적 확신도, 치료 효과 또는 환자 적합도 점수가 아니다."
+    ))
     ai_summary: str | None = None
     abstract: str | None = None
     full_text_available: bool = False
     journal: str | None = None
-    doi: str | None = None
+    doi: str | None = Field(default=None, description="RAG가 제공한 DOI. 없으면 null이며 추정하지 않는다.")
     organization: str | None = None
-    source_url: str | None = None
+    source_url: str | None = Field(default=None, description="RAG가 제공한 출처 URL. 없으면 null이며 생성하지 않는다.")
 
 
 class EvidencePackage(AgentModel):

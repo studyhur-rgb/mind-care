@@ -41,7 +41,9 @@ TOOL_CONTRACTS = {
                      c.RecentCareLogsInput, c.RecentCareLogsOutput),
         ToolContract(ToolName.PATIENT_HISTORY, "관찰 지표의 집계 시계열 조회. 집계 계약 미연결.",
                      c.PatientHistoryInput, c.PatientHistoryOutput),
-        ToolContract(ToolName.SEARCH_EVIDENCE, "RAG 서비스에서 연구/가이드라인 근거 검색.",
+        ToolContract(ToolName.SEARCH_EVIDENCE,
+                     "연구·의학적 근거가 필요할 때 현재 corpus에서 치매/MCI 및 인지건강 관련 연구 근거 후보를 검색한다. "
+                     "검색 결과나 relevance_score만으로 의료 주장 진위 또는 evidence level을 판단하지 않는다.",
                      c.EvidenceSearchInput, c.EvidencePackage),
         ToolContract(ToolName.SAVE_AI_ANNOTATION, "현재 환자 소유 기록의 구조화 분석 저장.",
                      c.AIAnnotationInput, c.AIAnnotationOutput),

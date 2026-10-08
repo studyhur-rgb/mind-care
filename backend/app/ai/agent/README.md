@@ -112,6 +112,60 @@ Agent의 extra 금지 및 유한 코사인 점수 범위 검증은 유지한다.
 예시 `categories/recorded_at/structured_data` 대신 DB의 `log_type/logged_at`을 사용한다.
 수면 등의 category, 장기 metric 집계, annotation은 아직 DB에 존재하는 계약이 아니다.
 
+### search_evidence V1 semantics
+
+`search_evidence`는 현재 RAG corpus에서 치매/MCI 및 인지건강 관련 **연구 근거 후보**를
+검색하는 read-only Tool이다. 연구·의학적 근거가 필요한 질문이나 설명에서 사용한다.
+환자 DB 조회, 논문 품질/근거 수준 평가, 의료적 확신도 계산, 치료 효과 확률 계산은
+이 Tool의 목적에 포함하지 않는다. 검색된 논문이 특정 의료적 주장을 지지한다는 보장도 없다.
+**Retrieval relevance != Evidence appraisal != Medical conclusion**을 유지한다.
+
+**입력:** `query`는 1..2000자이며 사용자 원문 또는 Workflow/Agent가 검색 목적에 맞게
+재구성한 질문을 허용한다. 임상/돌봄 맥락은 포함할 수 있지만 검색에 불필요한 직접 식별정보
+(patient/user UUID, 이름, 전화번호, 주소 등)는 최소화하여 query에 포함하지 않는다.
+이 원칙은 의미 정책이며 개인정보 검출 validator를 구현한 것은 아니다.
+Agent input validator는 whitespace-only query를 거부하고, nonblank query를 trim/정규화/재작성하지 않는다.
+현재 RAG `search()`는 자체적으로 query를 strip한다. Agent 입력 원문 보존과 RAG 내부 처리는 구분한다.
+따라서 현재 RAG가 반환하는 `EvidencePackage.query`는 검색 실행 전에 `(query or "").strip()`으로 정규화된 검색 query를 나타내며, Agent가 제출한 원문과 항상 byte-for-byte 동일하지는 않다.
+LLM input은 `query`, `top_k` 두 필드뿐이며 `patient_id`/`user_id`/`exclude_animal`은 노출하지 않는다.
+`top_k`는 StrictInt, 기본 5, 범위 1..20인 **최대** 반환 개수다. 정확히 N개를 채우는 보장은 없다.
+
+**검색 책임과 점수:** query embedding은 RAG 영역의 BGE-M3가 담당하고 DB 검색은
+pgvector cosine similarity 기반이다. 현재 별도 reranker는 없다. Agent/향후 Handler는
+임베딩·검색 알고리즘을 구현하는 대신 RAG를 호출하고 반환 계약을 검증한다.
+`relevance_score`는 cosine-similarity 기반 retrieval score이며 Agent는 유한한 [-1, 1] 값을 허용한다.
+논문 품질, evidence level, 의료적 확신도, 치료 효과 또는 환자 적합도 점수로 해석하지 않는다.
+RAG 모델의 Field description에는 현재 0~1 표현이 있으나 Agent의 [-1, 1] 계약과 계산 방식은 유지한다.
+
+**동물 연구 정책:** 보호자에게 사람 대상 근거를 제공하기 위해 향후 Real Adapter는
+server-side RAG policy로 `exclude_animal=True`를 전달해야 한다. LLM이 이 정책을 선택하지 않는다.
+제외 대상은 RAG classifier가 동물/세포 전용 연구로 판단한 결과다. 인간 연구 신호가 있는
+mixed study를 단순히 동물 관련 표현 때문에 제외한다는 뜻은 아니다.
+세부 판별 알고리즘의 정본은 `app.ai.retrieval.evidence`이며 이번 계약에서는 재구현하지 않는다.
+
+**순서와 참조:** `EvidencePackage.evidence`의 순서는 RAG가 반환한 순서가 정본이다.
+Agent와 향후 Handler/Adapter는 임의 재정렬하지 않는다. Structured Output의 authoritative reference는
+성공한 `search_evidence`의 `tool_call_id`와 해당 호출의 `evidence[]` 배열에 대한 **0-based**
+`evidence_index` 쌍이다. 기존 `outputs.py`의 참조 검증/metadata 복사를 그대로 사용한다.
+
+**성공과 실패:** `evidence=[]`, `top_k`보다 적은 결과, 동물 필터링 후 결과 감소,
+개별 candidate의 상세 데이터 누락에 따른 결과 감소는 정상 성공이 될 수 있다.
+`get_papers_by_ids()`는 존재하지 않는 candidate를 제외할 수 있으므로 향후 검색 경계에서는
+그 누락만으로 전체 검색을 반드시 실패 처리하지 않고 나머지 정상 evidence를 유지할 수 있다.
+전체 RAG/DB 실행 exception, timeout, Tool output contract 위반은 별개의 실패이며
+이를 빈 성공 package로 바꿔 숨기지 않는다.
+빈 결과의 의미는 "현재 corpus와 query/검색 정책에서 반환 가능한 근거가 없었다"로 제한한다.
+치료 효과 없음, 행동의 안전함, 세상에 관련 연구가 없음 또는 RAG 장애를 의미하지 않는다.
+
+**Metadata와 운영 경계:** 기존 PMID/DOI/저널/출판연도/URL/제목/연구 유형/기관 등의
+metadata를 유지한다. nullable metadata가 없으면 null이며 Agent/LLM이 추정하거나 생성하지 않는다.
+스키마는 `new_research | guideline`을 허용하지만 현재 실제 검색은 `new_research`를 반환한다.
+실제 RAG가 제공하지 않은 guideline을 Agent/Adapter가 만들거나 임의 승격하지 않는다.
+V1에는 `paper_id`, `source_id`, `corpus_updated_at`, `authors`, evidence level A/B/C/D 필드나 mapping을 추가하지 않는다.
+이 Tool은 환자/DB 데이터를 변경하거나 결과를 저장하는 side effect가 없다.
+Real Handler/Adapter, `top_k → k` 변환, 정책 전달 및 실연결 검증은 후속 작업이며
+현재 `production_registry()`는 계속 비어 있다. `EvidencePackage`의 기존 필드 구조를 유지한다.
+
 ## Context / Prompt 경계
 
 `AgentContext`는 `request_id: str`, `user_id: UUID`, `patient_id: UUID`, `locale=ko-KR`를 담는
