@@ -75,7 +75,7 @@ UUID는 레포 실제 타입을 따른다. 날짜는 ISO 날짜, 시각은 datet
 
 | Tool / 목적 | Input → Output 모델 | 주요 입력 | 주요 출력 |
 |---|---|---|---|
-| `get_patient_profile`: 현재 환자 프로필 | `PatientProfileInput` → `PatientProfileOutput` | `include_conditions: bool=true`, `include_care_environment: bool=true` | `patient_id: UUID`, `name?`, `dementia_stage?`, `diagnosis_date?`, `symptoms: list[str]`, `interests: list[str]`, `conditions?: list[str]`, `care_environment?: {type: str}` |
+| `get_patient_profile`: 저장된 기본 환자 프로필 snapshot | `PatientProfileInput` → `PatientProfileOutput` | `{}` (추가 argument 금지) | `name?: str`, `dementia_stage?: str`, `diagnosis_date?: date`, `symptoms: list[str]`, `interests: list[str]` |
 | `get_recent_care_logs`: 최근 기록 | `RecentCareLogsInput` → `RecentCareLogsOutput` | `days: int=14 (1..365)`, `log_types: list[patient_care/caregiver_selfcare]=[patient_care]`, `limit: int=50 (1..100)` | `period: {from_date,to_date}`, `logs: list[CareLog]`, `total_count: int>=0` |
 | `get_patient_history`: 지표 시계열 | `PatientHistoryInput` → `PatientHistoryOutput` | `metric: str`, `period_days: int=90 (1..365)`, `aggregation: daily/weekly/monthly=weekly` | `metric`, `aggregation`, `data: list[{period_start: date,count: int>=0}]`, `summary: {latest_value,previous_value,change: int}` |
 | `search_evidence`: RAG 근거 | `EvidenceSearchInput` → `EvidencePackage` | `query: str (1..2000자)`, `top_k: int=5 (1..20)` | `query`, `evidence: list[EvidenceItem]` |
@@ -108,9 +108,56 @@ Agent의 extra 금지 및 유한 코사인 점수 범위 검증은 유지한다.
 
 예시의 `age/sex/cognitive_status`는 현재 환자 스키마에 없으므로 추가하지 않았다.
 실제 `dementia_stage/diagnosis_date/symptoms/interests`를 우선했다.
-`conditions/care_environment`는 선택적 Agent 확장이며 현재 DB 지원을 의미하지 않는다.
+`conditions/care_environment`는 `get_patient_profile V1` 범위에서 제외한다.
 예시 `categories/recorded_at/structured_data` 대신 DB의 `log_type/logged_at`을 사용한다.
 수면 등의 category, 장기 metric 집계, annotation은 아직 DB에 존재하는 계약이 아니다.
+
+### get_patient_profile V1 semantics
+
+`get_patient_profile`은 trusted server `AgentContext`가 지정한 환자의 **DB에 저장된 기본
+프로필 snapshot**을 읽기 전용으로 조회하는 Tool이다. Chat/Feed 등의 개인화 context가
+필요할 때 사용한다. 아래 의미는 V1 계약이며 현재 Handler는 deterministic 합성 Fake다.
+Real Handler, Backend Adapter, DB 조회 함수와 production 등록은 후속 작업이다.
+
+대상 환자는 서버의 `AgentContext.patient_id`/`user_id` 및 서버 측 인증/접근권한 경계가
+결정한다. LLM-visible input은 `{}`이며 `patient_id`, `user_id`, `caregiver_id`,
+`include_conditions`, `include_care_environment` 등 추가 argument를 모두 거부한다.
+`PatientProfileOutput`에도 `patient_id`를 포함하지 않는다. 단, 현재 `PromptBuilder`는
+trusted `AgentContext` 자체를 system message로 직렬화하므로 `patient_id`/`user_id`가
+LLM prompt에 전달된다. 이 계약은 LLM이 UUID를 전혀 볼 수 없음을 보장하지 않는다.
+Context ID의 prompt redaction은 별도 보안/Prompt-boundary 후속 과제다.
+
+출력은 다음 5개 필드만 포함하며 저장되지 않은 정보를 추정하거나 생성하지 않는다.
+
+- `name`: 저장된 표시 이름/별칭. 법적 실명을 보장하지 않으며 미등록이면 null이다.
+- `dementia_stage`: 저장된 stage 문자열(`str | None`). 최신 임상 평가 결과나 임상적으로
+  확정된 현재 단계를 보장하지 않는다. CDR, 임상 평가, 돌봄 기록 등으로 새로 판정하거나
+  보정·정규화하지 않는다. 미등록이면 null이며 enum/MCI 분류는 이번 V1에서 결정하지 않는다.
+- `diagnosis_date`: 저장된 진단일. 미등록이면 null이며 다른 정보에서 추정하지 않는다.
+  Pydantic `date`의 기존 ISO JSON 직렬화를 사용한다.
+- `symptoms`: 프로필에 등록된 증상 항목/태그. 임상적으로 확인된 전체 증상 목록이 아니며
+  다른 기록에서 증상을 추가하지 않는다. `[]`는 저장된 항목이 없다는 뜻이며 무증상을 뜻하지 않는다.
+- `interests`: 프로필에 등록된 관심 치료/관리 분야. 의료적으로 권장된 치료 목록이 아니다.
+  `[]`는 저장된 항목이 없다는 뜻이며 실제 관심이나 관리 필요성이 없다는 뜻이 아니다.
+
+`name`, `dementia_stage`, `diagnosis_date`가 모두 null이고 `symptoms`, `interests`가 모두
+`[]`인 출력도 **성공적으로 조회된 sparse profile**일 수 있다. 이는 profile row가 존재하고
+선택 정보가 미등록이라는 뜻이며, dementia/MCI가 아님·진단받은 적 없음·증상/관심 없음으로
+해석하면 안 된다. 저장된 profile data는 독립적으로 검증된 임상 사실 또는 Agent inference와
+구분한다. 예를 들어 “프로필에 경도 단계가 저장되어 있다”는 설명은 가능하지만,
+이를 “현재 경도 치매가 임상적으로 확진되었다”로 바꾸지 않는다.
+
+대상 profile 자체를 찾지 못함, 접근 권한 문제, DB 조회 실패, timeout, Handler exception,
+Tool output contract 위반은 실패다. 이러한 실패를 null/`[]`의 sparse success로 위장하지 않는다.
+현재 Executor의 `empty_result`, `invalid_output`, `tool_exception`, `tool_timeout`을 재사용하며,
+실제 DB not-found/access-denied 처리와 row identity/권한 검증은 향후 Real Handler의 책임이다.
+
+최근 돌봄 기록, `profile_summaries`, 임상 평가, 복약, 안전/행동 이벤트, 병원 방문 기록을
+조회하거나 결합하지 않는다. `conditions`, `care_environment`, caregiver relationship,
+`reading_level`, 사용자/간병인 ID는 출력 범위에 없다. 장기 patient-memory semantic retrieval,
+embedding 검색/생성/저장, dementia stage 재판정 또는 의료적 진단/추론 Tool이 아니다.
+향후 Real Handler에서도 read-only semantics를 유지하며 profile 수정, DB write,
+annotation 저장, semantic memory 갱신 등의 side effect를 수행하지 않는다.
 
 ### search_evidence V1 semantics
 
@@ -173,9 +220,10 @@ Real Handler/Adapter, `top_k → k` 변환, 정책 전달 및 실연결 검증�
 Tool Handler는 `(context, validated_input)`을 받는다. LLM이 patient/user ID를 입력하면 검증에서 거부한다.
 `log_id` 같은 리소스 ID는 실제 저장 Adapter가 반드시 Context의 사용자/환자 소유권을 검증해야 한다.
 Fake annotation은 고정 합성 `FAKE_LOG_ID`만 수락하며 실제 환자 권한 검증을 흉내 내지 않는다.
-출력 모델에 `patient_id`가 있으면 Executor가 Context와 비교한다. 현재 해당 모델은
-PatientProfileOutput이다. 불일치는 데이터 직렬화/LLM 전달 전에 거부하고 Agent를 failed로 종료한다.
-최근 기록/시계열에는 환자 ID 필드가 없으므로 이 검사가 실제 소유권 조회를 대체하지 않는다.
+Executor에는 출력 모델에 `patient_id`가 있을 때 Context와 비교하는 일반 검사가 남아 있다.
+`PatientProfileOutput V1`에는 이 필드가 없으므로 해당 검사는 profile에 적용되지 않는다.
+향후 Real Handler는 출력의 5개 필드로 projection하기 전에 조회 row의 identity와 접근 권한을
+검증해야 한다. 출력 ID 제거 또는 schema 검증만으로 실제 환자 소유권 검증을 대체하지 않는다.
 
 PromptBuilder를 생성자에 주입한다:
 
@@ -282,7 +330,7 @@ Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 �
 
 | Tool | 필요한 backing 계약/합의 |
 |---|---|
-| 프로필 | Context의 사용자/환자 소유권을 검증하는 환자 프로필 조회 함수; 선택 확장 필드의 출처 |
+| 프로필 | Context의 사용자/환자 소유권과 row identity를 검증하는 조회 함수; sparse success와 profile not-found/failure 구분 후 V1 5개 필드로 변환 |
 | 최근 기록 | 사용자/환자 + 날짜 범위 + log_type + limit 기반 조회/전체 건수; 타임존/자기 돌봄 기록 범위 |
 | 장기 변화 | metric 추출의 구조화 데이터 출처, aggregation/기간/빈 값 정의, 결정적 집계 함수 |
 | 근거 검색 | `EvidenceRetriever.search_evidence(query, top_k, context) -> EvidencePackage`; query embedding과 검색은 RAG 담당 |

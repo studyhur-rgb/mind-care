@@ -12,10 +12,8 @@ FIXTURE_DATE = date(2026, 10, 6)
 
 def fake_get_patient_profile(context: AgentContext, args: c.PatientProfileInput) -> c.PatientProfileOutput:
     return c.PatientProfileOutput(
-        patient_id=context.patient_id, name="합성 테스트 환자", dementia_stage="경도",
+        name="합성 테스트 환자", dementia_stage="경도",
         diagnosis_date=date(2025, 1, 1), symptoms=["수면 변화"], interests=["수면"],
-        conditions=["합성 테스트 조건"] if args.include_conditions else None,
-        care_environment=c.CareEnvironment(type="test_home") if args.include_care_environment else None,
     )
 
 

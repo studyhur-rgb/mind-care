@@ -35,7 +35,9 @@ class ToolContract:
 
 TOOL_CONTRACTS = {
     contract.name: contract for contract in (
-        ToolContract(ToolName.PATIENT_PROFILE, "현재 서버 Context의 환자 프로필 조회.",
+        ToolContract(ToolName.PATIENT_PROFILE,
+                     "개인화 context가 필요할 때 trusted server Context가 지정한 환자의 저장된 기본 프로필 snapshot을 읽기 전용으로 조회한다. "
+                     "저장된 profile 값만 사용하며 최근 기록·임상 평가·복약 정보를 추론하거나 결합하지 않는다.",
                      c.PatientProfileInput, c.PatientProfileOutput),
         ToolContract(ToolName.RECENT_CARE_LOGS, "현재 환자의 최근 돌봄 기록 조회.",
                      c.RecentCareLogsInput, c.RecentCareLogsOutput),

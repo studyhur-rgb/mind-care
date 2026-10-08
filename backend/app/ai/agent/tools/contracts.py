@@ -9,24 +9,25 @@ from ..schemas import AgentModel
 
 
 class PatientProfileInput(AgentModel):
-    include_conditions: StrictBool = True
-    include_care_environment: StrictBool = True
-
-
-class CareEnvironment(AgentModel):
-    type: str
+    pass
 
 
 class PatientProfileOutput(AgentModel):
-    patient_id: UUID
-    name: str | None = None
-    dementia_stage: str | None = None
-    diagnosis_date: date | None = None
-    symptoms: list[str] = Field(default_factory=list)
-    interests: list[str] = Field(default_factory=list)
-    # 현재 DB에 없는 선택적 확장. 합의 전 실제 데이터인 것처럼 채우지 않는다.
-    conditions: list[str] | None = None
-    care_environment: CareEnvironment | None = None
+    name: str | None = Field(
+        default=None, description="프로필에 저장된 표시 이름/별칭. 법적 실명을 보장하지 않으며 미등록이면 null; 추정하지 않는다."
+    )
+    dementia_stage: str | None = Field(
+        default=None, description="프로필에 저장된 stage 문자열. 최신 임상 평가/확정 단계를 보장하지 않으며 다른 기록으로 판정·보정·정규화하지 않는다. 미등록이면 null."
+    )
+    diagnosis_date: date | None = Field(
+        default=None, description="프로필에 저장된 진단일(ISO date). 미등록이면 null이며 다른 정보에서 추정하지 않는다."
+    )
+    symptoms: list[str] = Field(
+        default_factory=list, description="프로필에 등록된 증상 항목/태그. 임상적으로 확인된 전체 목록이 아니며 다른 기록에서 추가하지 않는다. []는 미등록이며 무증상을 뜻하지 않는다."
+    )
+    interests: list[str] = Field(
+        default_factory=list, description="프로필에 등록된 관심 치료/관리 분야. 의학적 권장 치료 목록이 아니다. []는 미등록이며 실제 관심이나 관리 필요성이 없다는 뜻이 아니다."
+    )
 
 
 class RecentCareLogsInput(AgentModel):

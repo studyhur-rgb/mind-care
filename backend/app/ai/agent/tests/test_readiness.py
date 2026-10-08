@@ -70,7 +70,7 @@ class TimeoutTests(TestCase):
         def handler(context, args):
             release.wait(2)
             finished.set()
-            return c.PatientProfileOutput(patient_id=context.patient_id)
+            return c.PatientProfileOutput()
         try:
             started = monotonic()
             outcome, trace = ToolExecutor(registry_with(handler), timeout_seconds=0.03).execute(call(), CONTEXT)
@@ -91,7 +91,7 @@ class TimeoutTests(TestCase):
         def handler(context, args):
             calls.append(context.patient_id)
             release.wait(2)
-            return c.PatientProfileOutput(patient_id=context.patient_id)
+            return c.PatientProfileOutput()
         client = FakeLLMClient([tool_turn(call(), call(identifier="call_2")), ModelTurn(text="must not run")])
         try:
             result = AgentOrchestrator(client, registry_with(handler), tool_timeout_seconds=0.03,
@@ -126,7 +126,7 @@ class TimeoutTests(TestCase):
         release = Event()
         def handler(context, args):
             release.wait(2)
-            return c.PatientProfileOutput(patient_id=context.patient_id)
+            return c.PatientProfileOutput()
         client = FakeLLMClient([tool_turn(call())])
         try:
             result = AgentOrchestrator(client, registry_with(handler), tool_timeout_seconds=1,
@@ -228,7 +228,7 @@ class FailureBoundaryTests(TestCase):
 
     def test_malformed_executor_results_do_not_escape_or_continue(self):
         valid_outcome = ToolOutcome(call_id="call_1", tool_name=ToolName.PATIENT_PROFILE.value,
-                                   success=True, data={"patient_id": str(CONTEXT.patient_id)})
+                                   success=True, data=c.PatientProfileOutput().model_dump(mode="json"))
         valid_trace = ToolTrace(tool_name=ToolName.PATIENT_PROFILE.value, success=True, duration_ms=0)
         invalid = [(valid_outcome, {"PRIVATE": "invalid"}), ({"PRIVATE": "invalid"}, valid_trace),
                    (valid_outcome, ToolTrace.model_construct(tool_name="PRIVATE", success=True, duration_ms=float("nan"))),
@@ -286,21 +286,27 @@ class FailureBoundaryTests(TestCase):
         with patch.object(engine.executor, "execute", return_value=(outcome, trace)):
             self.assert_failed(engine, "evidence_validation_error")
 
-    def test_mismatched_patient_is_not_returned_or_sent_to_llm(self):
-        client = FakeLLMClient([tool_turn(call()), ModelTurn(text="must not run")])
-        registry = registry_with(lambda context, args: c.PatientProfileOutput(patient_id=UUID(int=99), name="PRIVATE patient"))
+    def test_profile_identity_field_is_rejected_and_not_sent_to_llm(self):
+        client = FakeLLMClient([tool_turn(call()), ModelTurn(text="recovered")])
+        registry = registry_with(lambda context, args: {"patient_id": UUID(int=99), "name": "PRIVATE patient"})
         outcome, _ = ToolExecutor(registry).execute(call(), CONTEXT)
         self.assertFalse(outcome.success)
-        self.assertEqual(outcome.error.code, "patient_context_mismatch")
+        self.assertEqual(outcome.error.code, "invalid_output")
         self.assertIsNone(outcome.data)
-        self.assert_failed(AgentOrchestrator(client, registry), "patient_context_mismatch")
-        self.assertEqual(len(client.requests), 1)
+        result = AgentOrchestrator(client, registry).run("synthetic", CONTEXT)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual([error.code for error in result.errors], ["invalid_output"])
+        self.assertNotIn("PRIVATE", result.model_dump_json())
+        tool_result = next(message for message in client.requests[-1][0] if message.role == "tool")
+        self.assertNotIn("PRIVATE", tool_result.content)
+        self.assertEqual(len(client.requests), 2)
 
-    def test_matching_patient_succeeds(self):
+    def test_profile_without_identity_succeeds(self):
         outcome, _ = ToolExecutor(registry_with(
-            lambda context, args: c.PatientProfileOutput(patient_id=context.patient_id))).execute(call(), CONTEXT)
+            lambda context, args: c.PatientProfileOutput(name="synthetic"))).execute(call(), CONTEXT)
         self.assertTrue(outcome.success)
-        self.assertEqual(outcome.data["patient_id"], str(CONTEXT.patient_id))
+        self.assertEqual(outcome.data["name"], "synthetic")
+        self.assertNotIn("patient_id", outcome.data)
 
 
 class RegistrationAndConfigurationTests(TestCase):
