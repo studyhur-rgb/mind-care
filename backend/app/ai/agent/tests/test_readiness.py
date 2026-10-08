@@ -388,22 +388,21 @@ class OutputConsistencyTests(TestCase):
                     c.PatientHistoryOutput(metric="synthetic", aggregation="weekly", data=points,
                         summary={"latest_value": 1, "previous_value": 1, "change": 0})
 
-    def logs(self, timestamps, ids=None, total=None):
-        return c.RecentCareLogsOutput(period={"from_date": "2026-10-01", "to_date": "2026-10-06"},
-            logs=[{"log_id": str(identifier), "logged_at": timestamp, "log_type": "patient_care"}
-                  for identifier, timestamp in zip(ids or [UUID(int=i + 1) for i in range(len(timestamps))], timestamps)],
+    def logs(self, timestamps, total=None):
+        return c.RecentCareLogsOutput(period={"start_at": "2026-10-01T00:00:00Z", "end_at": "2026-10-06T00:00:00Z"},
+            logs=[{"logged_at": timestamp} for timestamp in timestamps],
             total_count=len(timestamps) if total is None else total)
 
-    def test_care_log_range_inclusive_and_uses_explicit_offset(self):
-        output = self.logs(["2026-10-01T00:00:00+09:00", "2026-10-06T23:59:59-04:00"], total=9)
+    def test_care_log_range_half_open_and_compares_instants(self):
+        output = self.logs(["2026-10-05T19:59:59-04:00", "2026-09-30T20:00:00-04:00"], total=9)
         self.assertEqual(len(output.logs), 2)
-        for timestamp in ("2026-09-30T23:59:59+09:00", "2026-10-07T00:00:00+09:00"):
+        for timestamp in ("2026-10-01T00:00:00+09:00", "2026-10-05T20:00:00-04:00"):
             with self.subTest(timestamp=timestamp), self.assertRaises(ValidationError):
                 self.logs([timestamp])
 
-    def test_duplicate_log_ids_rejected(self):
-        with self.assertRaises(ValidationError):
-            self.logs(["2026-10-05T01:00:00+09:00", "2026-10-05T02:00:00+09:00"], [UUID(int=1), UUID(int=1)])
+    def test_equal_visible_care_logs_are_allowed(self):
+        output = self.logs(["2026-10-05T01:00:00+09:00"] * 2)
+        self.assertEqual(len(output.logs), 2)
 
     def test_naive_log_timestamps_rejected(self):
         with self.assertRaises(ValidationError):

@@ -8,6 +8,20 @@ from ..tools import contracts as c
 
 FAKE_LOG_ID = UUID("00000000-0000-0000-0000-000000000003")
 FIXTURE_DATE = date(2026, 10, 6)
+FIXTURE_NOW = datetime(2026, 10, 6, 12, tzinfo=timezone.utc)
+
+# 전부 합성 patient_care 기록이다. UUID는 내부 tie-break만을 위한 값이다.
+_FAKE_CARE_LOG_ROWS = (
+    (UUID(int=4), FIXTURE_NOW - timedelta(hours=2), "[FAKE] 합성 관찰 동시각 A", None),
+    (FAKE_LOG_ID, FIXTURE_NOW - timedelta(hours=25), "[FAKE] 새벽에 여러 차례 잠에서 깸", None),
+    (UUID(int=5), FIXTURE_NOW - timedelta(hours=2), "[FAKE] 합성 관찰 동시각 B", "합성 태그"),
+    (UUID(int=9), FIXTURE_NOW - timedelta(hours=1), "[FAKE] 합성 관찰 최근", " 차분 "),
+    (UUID(int=6), FIXTURE_NOW - timedelta(days=14), None, None),
+    (UUID(int=7), FIXTURE_NOW - timedelta(days=15), "[FAKE] 이전 범위 관찰", None),
+    (UUID(int=8), FIXTURE_NOW - timedelta(days=91), "[FAKE] 최대 범위 밖 관찰", None),
+    (UUID(int=10), FIXTURE_NOW, "[FAKE] 종료 경계 관찰", None),
+    (UUID(int=11), FIXTURE_NOW + timedelta(hours=1), "[FAKE] 종료 이후 관찰", None),
+)
 
 
 def fake_get_patient_profile(context: AgentContext, args: c.PatientProfileInput) -> c.PatientProfileOutput:
@@ -18,13 +32,15 @@ def fake_get_patient_profile(context: AgentContext, args: c.PatientProfileInput)
 
 
 def fake_get_recent_care_logs(context: AgentContext, args: c.RecentCareLogsInput) -> c.RecentCareLogsOutput:
-    start = FIXTURE_DATE - timedelta(days=args.days - 1)
-    log = c.CareLog(log_id=FAKE_LOG_ID,
-                    logged_at=datetime(2026, 10, 5, 2, 10, tzinfo=timezone(timedelta(hours=9))),
-                    log_type="patient_care", content="[FAKE] 새벽에 여러 차례 잠에서 깸")
-    logs = [log] if log.log_type in args.log_types and start <= log.logged_at.date() <= FIXTURE_DATE else []
-    return c.RecentCareLogsOutput(period=c.DatePeriod(from_date=start, to_date=FIXTURE_DATE),
-                                 logs=logs[:args.limit], total_count=len(logs))
+    # 실제 DB 권한 검증은 하지 않는다. 요청당 고정된 end_at과 immutable fixture만 사용한다.
+    end = FIXTURE_NOW
+    start = end - timedelta(days=args.days)
+    rows = [row for row in _FAKE_CARE_LOG_ROWS if start <= row[1] < end]
+    rows.sort(key=lambda row: (row[1], row[0]), reverse=True)
+    logs = [c.CareLogItem(logged_at=timestamp, content=content, mood_tag=mood)
+            for _, timestamp, content, mood in rows[:args.limit]]
+    return c.RecentCareLogsOutput(period=c.RecentCareLogsPeriod(start_at=start, end_at=end),
+                                 logs=logs, total_count=len(rows))
 
 
 def fake_get_patient_history(context: AgentContext, args: c.PatientHistoryInput) -> c.PatientHistoryOutput:

@@ -1,5 +1,5 @@
 """6개 후보 Tool의 Agent 전용 입력/출력. 확장 필드는 DB 필드가 아니다."""
-from datetime import date
+from datetime import date, timezone
 from typing import Literal
 from uuid import UUID
 
@@ -31,47 +31,54 @@ class PatientProfileOutput(AgentModel):
 
 
 class RecentCareLogsInput(AgentModel):
-    days: StrictInt = Field(default=14, ge=1, le=365)
-    log_types: list[Literal["patient_care", "caregiver_selfcare"]] = Field(
-        default_factory=lambda: ["patient_care"]
+    days: StrictInt = Field(
+        default=14, ge=1, le=90,
+        description="서버가 결정한 종료 시각 기준 최근 N×24시간 rolling window. 달력 날짜 수가 아니다. 대상 사용자/환자는 trusted server Context로 결정하며 patient_care 조건은 서버에서 고정한다."
     )
-    limit: StrictInt = Field(default=50, ge=1, le=100)
+    limit: StrictInt = Field(
+        default=10, ge=1, le=30, description="최대 반환 기록 수. 정확히 이 개수의 결과를 요구하는 값이 아니다."
+    )
 
 
-class DatePeriod(AgentModel):
-    from_date: date
-    to_date: date
+class RecentCareLogsPeriod(AgentModel):
+    start_at: AwareDatetime = Field(description="조회 시작 시각(inclusive). Handler가 end_at에서 days×24시간을 뺀 시각.")
+    end_at: AwareDatetime = Field(description="조회 종료 시각(exclusive). Handler가 요청당 한 번 결정하는 시각.")
 
     @model_validator(mode="after")
     def check_order(self):
-        if self.from_date > self.to_date:
-            raise ValueError("Invalid date period")
+        if self.start_at.astimezone(timezone.utc) >= self.end_at.astimezone(timezone.utc):
+            raise ValueError("Invalid care log period")
         return self
 
 
-class CareLog(AgentModel):
-    log_id: UUID
-    logged_at: AwareDatetime
-    log_type: Literal["patient_care", "caregiver_selfcare"]
-    content: str | None = None
-    mood_tag: str | None = None
+class CareLogItem(AgentModel):
+    logged_at: AwareDatetime = Field(description="DB에 저장된 기록 시각. 서술된 사건/증상의 실제 발생 시각으로 추론하지 않는다.")
+    content: str | None = Field(
+        default=None, description="간병인이 저장한 자유 서술 관찰 원문. 비신뢰 데이터이며 임상적으로 검증된 사실/진단이 아니다. 보완·추정·재작성하지 않는다. null은 미등록이며 증상/문제 없음이 아니다."
+    )
+    mood_tag: str | None = Field(
+        default=None, description="patient_care에 대해 저장된 당시 환자 기분 태그라는 Agent V1 해석. 임상 평가/점수/진단이 아니다. 원문을 추정·정규화하지 않으며 null은 미등록이다."
+    )
 
 
 class RecentCareLogsOutput(AgentModel):
-    period: DatePeriod
-    logs: list[CareLog]
-    total_count: StrictInt = Field(ge=0)
+    period: RecentCareLogsPeriod
+    logs: list[CareLogItem]
+    total_count: StrictInt = Field(
+        ge=0, description="동일한 권한/사용자/환자/patient_care/기간 조건의 전체 row 수(limit 적용 전)."
+    )
 
     @model_validator(mode="after")
     def check_count(self):
         if self.total_count < len(self.logs):
             raise ValueError("Count cannot be less than returned logs")
-        ids = [log.log_id for log in self.logs]
-        if len(ids) != len(set(ids)):
-            raise ValueError("Duplicate care log IDs")
-        # 출력 기간은 각 기록의 명시적 offset에서 본 local date를 기준으로 한다.
-        if any(not self.period.from_date <= log.logged_at.date() <= self.period.to_date for log in self.logs):
+        start = self.period.start_at.astimezone(timezone.utc)
+        end = self.period.end_at.astimezone(timezone.utc)
+        timestamps = [log.logged_at.astimezone(timezone.utc) for log in self.logs]
+        if any(not start <= timestamp < end for timestamp in timestamps):
             raise ValueError("Care log is outside the returned period")
+        if any(previous < current for previous, current in zip(timestamps, timestamps[1:])):
+            raise ValueError("Care logs must be latest-first")
         return self
 
 

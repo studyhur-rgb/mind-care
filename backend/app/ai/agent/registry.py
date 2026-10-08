@@ -39,7 +39,9 @@ TOOL_CONTRACTS = {
                      "개인화 context가 필요할 때 trusted server Context가 지정한 환자의 저장된 기본 프로필 snapshot을 읽기 전용으로 조회한다. "
                      "저장된 profile 값만 사용하며 최근 기록·임상 평가·복약 정보를 추론하거나 결합하지 않는다.",
                      c.PatientProfileInput, c.PatientProfileOutput),
-        ToolContract(ToolName.RECENT_CARE_LOGS, "현재 환자의 최근 돌봄 기록 조회.",
+        ToolContract(ToolName.RECENT_CARE_LOGS,
+                     "개인화 context가 필요할 때 trusted server Context가 지정한 현재 환자에 대해 간병인이 저장한 최근 patient_care 돌봄 기록을 읽기 전용으로 조회한다. "
+                     "반환된 기록은 간병인의 관찰·서술이며 임상적으로 검증된 사실이나 진단으로 간주하지 않는다.",
                      c.RecentCareLogsInput, c.RecentCareLogsOutput),
         ToolContract(ToolName.PATIENT_HISTORY, "관찰 지표의 집계 시계열 조회. 집계 계약 미연결.",
                      c.PatientHistoryInput, c.PatientHistoryOutput),

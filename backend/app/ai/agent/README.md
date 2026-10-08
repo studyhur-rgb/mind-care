@@ -76,17 +76,16 @@ UUID는 레포 실제 타입을 따른다. 날짜는 ISO 날짜, 시각은 datet
 | Tool / 목적 | Input → Output 모델 | 주요 입력 | 주요 출력 |
 |---|---|---|---|
 | `get_patient_profile`: 저장된 기본 환자 프로필 snapshot | `PatientProfileInput` → `PatientProfileOutput` | `{}` (추가 argument 금지) | `name?: str`, `dementia_stage?: str`, `diagnosis_date?: date`, `symptoms: list[str]`, `interests: list[str]` |
-| `get_recent_care_logs`: 최근 기록 | `RecentCareLogsInput` → `RecentCareLogsOutput` | `days: int=14 (1..365)`, `log_types: list[patient_care/caregiver_selfcare]=[patient_care]`, `limit: int=50 (1..100)` | `period: {from_date,to_date}`, `logs: list[CareLog]`, `total_count: int>=0` |
+| `get_recent_care_logs`: 최근 patient_care 기록 | `RecentCareLogsInput` → `RecentCareLogsOutput` | `days: strict int=14 (1..90)`, `limit: strict int=10 (1..30)` | `period: {start_at,end_at}`, `logs: list[CareLogItem]`, `total_count: strict int>=0` |
 | `get_patient_history`: 지표 시계열 | `PatientHistoryInput` → `PatientHistoryOutput` | `metric: str`, `period_days: int=90 (1..365)`, `aggregation: daily/weekly/monthly=weekly` | `metric`, `aggregation`, `data: list[{period_start: date,count: int>=0}]`, `summary: {latest_value,previous_value,change: int}` |
 | `search_evidence`: RAG 근거 | `EvidenceSearchInput` → `EvidencePackage` | `query: str (1..2000자)`, `top_k: int=5 (1..20)` | `query`, `evidence: list[EvidenceItem]` |
 | `save_ai_annotation`: 돌봄 기록 분석 저장 | `AIAnnotationInput` → `AIAnnotationOutput` | `log_id: UUID`, `categories: list[str]`, `tags: list[str]`, `summary: str`, `follow_up_recommended: bool=false`, `follow_up_topics: list[str]` | `success: bool`, `annotation_id?: UUID` (성공 시 필수) |
 | `check_safety_flags`: 합의된 규칙 검사 | `SafetyFlagsInput` → `SafetyFlagsOutput` | `observations: list[{type: str,present: bool}]` | `flagged: bool`, `level: none/test_only`, `matched_rules: list[str]` |
 
-`CareLog`: `log_id: UUID`, `logged_at: datetime`, `log_type: patient_care/caregiver_selfcare`,
-`content?: str`, `mood_tag?: str`. `total_count`는 반환 제한 적용 전 일치하는 기록 수이며
-반환된 `logs` 수보다 작을 수 없다. 기간은 시작/끝 날짜를 포함한다.
-`logged_at`은 timezone offset이 필수이고, 각 offset의 local date가 기간 안에 있어야 한다.
-동일한 `log_id` 중복은 거부한다. 환자/지역별 timezone 통일 정책은 실제 연결 시 합의한다.
+`CareLogItem`: `logged_at: aware datetime`, `content: str | None=null`, `mood_tag: str | None=null`.
+기간의 `start_at`/`end_at`도 timezone-aware이며 `start_at <= logged_at < end_at`을 검사한다.
+`logs`는 실제 시각 기준 최신순(동일 시각 허용)이며 `total_count >= len(logs)`다.
+DB ID와 log_type은 결과에 노출하지 않고 동일한 visible data의 기록도 허용한다.
 
 시계열 `data`는 period_start 기준 오름차순이며 중복 기간을 거부한다.
 summary의 최근/이전 값은 마지막/마지막 이전 point와 일치해야 한다.
@@ -109,7 +108,7 @@ Agent의 extra 금지 및 유한 코사인 점수 범위 검증은 유지한다.
 예시의 `age/sex/cognitive_status`는 현재 환자 스키마에 없으므로 추가하지 않았다.
 실제 `dementia_stage/diagnosis_date/symptoms/interests`를 우선했다.
 `conditions/care_environment`는 `get_patient_profile V1` 범위에서 제외한다.
-예시 `categories/recorded_at/structured_data` 대신 DB의 `log_type/logged_at`을 사용한다.
+돌봄 기록은 DB의 `logged_at`을 사용하며 `patient_care` 조건은 서버 내부 의미다.
 수면 등의 category, 장기 metric 집계, annotation은 아직 DB에 존재하는 계약이 아니다.
 
 ### get_patient_profile V1 semantics
@@ -158,6 +157,75 @@ Tool output contract 위반은 실패다. 이러한 실패를 null/`[]`의 spars
 embedding 검색/생성/저장, dementia stage 재판정 또는 의료적 진단/추론 Tool이 아니다.
 향후 Real Handler에서도 read-only semantics를 유지하며 profile 수정, DB write,
 annotation 저장, semantic memory 갱신 등의 side effect를 수행하지 않는다.
+
+### get_recent_care_logs V1 semantics
+
+`get_recent_care_logs`는 trusted server `AgentContext`가 지정한 현재 사용자/환자에 대해,
+간병인이 저장한 최근 **patient_care 돌봄 기록**을 제한된 범위에서 읽기 전용으로 조회해
+개인화 context를 제공하는 Tool이다. 현재는 합성 Fake만 존재한다. 아래 조회/권한 의미는
+V1 계약이며 실제 DB 조회 함수, Backend DTO/Adapter, Real Handler, production 등록은 후속이다.
+
+LLM-visible input은 `days`와 `limit`뿐이다. 두 값은 strict integer이며 문자열 숫자/bool/float를
+거부한다. `days`는 기본 14, 1..90이고 `limit`은 기본 10, 1..30의 최대 반환 개수다.
+`patient_id`, `user_id`, `caregiver_id`, `log_type`, `log_types`와 임의의 추가 필터는 받지 않는다.
+대상 사용자/환자와 종료 시각을 LLM argument로 선택하거나 바꿀 수 없다.
+기존 PromptBuilder의 trusted Context system message와 ID 전달은 이번에 변경하지 않는다.
+
+현재 단일 caregiver DB 구조에서 **향후 Real Handler/Backend Adapter가 강제할 backing semantics**:
+
+1. 먼저 `patient_profiles.id == context.patient_id`인 환자의
+   `patient_profiles.caregiver_id == context.user_id`인지 서버에서 검증한다.
+2. 조회 row는 `care_logs.patient_id == context.patient_id`,
+   `care_logs.user_id == context.user_id`, `care_logs.log_type == "patient_care"`를 모두 만족해야 한다.
+
+이는 현재 Fake가 실제 접근 권한을 검증한다는 뜻이 아니다. 권한/identity 실패를 빈 logs로
+위장하지 않는다. DB query, 권한 적용, timeout/cancellation 및 production 연결은 후속 책임이다.
+
+`end_at`은 Handler가 요청당 한 번 결정한 조회 종료 시각이고,
+`start_at = end_at - timedelta(days=args.days)`다. 달력 날짜 N개가 아닌 최근 **N×24시간
+rolling window**이며 DST 등에서도 UTC instant 기준으로 N×24시간을 뺀다.
+조회 범위는 `start_at <= logged_at < end_at`(start inclusive / end exclusive)이고
+`start_at < end_at`이어야 한다. 모든 시각은 timezone-aware이며 offset이 달라도 실제 instant로
+비교한다. `logged_at`은 DB의 기록 시각이며 content가 서술하는 사건/증상의 발생 시각으로 추론하지 않는다.
+
+출력은 `period`, `logs`, `total_count`뿐이다. `period`는 `start_at`, `end_at`만,
+각 `CareLogItem`은 `logged_at`, `content`, `mood_tag`만 포함한다. 환자/사용자/간병인 ID와
+`log_id`/`log_type`은 결과에 노출하지 않는다. 로그는 `logged_at` 최신순(non-increasing)이고
+같은 시각이나 완전히 같은 visible data도 허용한다. 임의의 duplicate rejection을 하지 않는다.
+향후 DB ordering은 `ORDER BY logged_at DESC, id DESC`다. `id DESC`는 UUID가 더 최신이라는
+뜻이 아니라 동일 시각의 내부 deterministic tie-break이며 id는 LLM 결과에 포함하지 않는다.
+
+`total_count`는 동일한 authorization/patient/user/log_type/period 조건의 **limit 적용 전 전체 row 수**다.
+Handler는 `0 <= len(logs) <= limit`, `len(logs) <= total_count`를 유지해야 하며 일관된
+DB snapshot에서는 보통 `len(logs) == min(limit, total_count)`다. count와 목록의 snapshot
+일관성 확보는 Real Handler 책임이다. Output validator는 input.limit를 알지 못하므로
+이를 추측하지 않고 count 하한, 기간 포함 여부, 최신순만 검증한다.
+
+데이터 출처와 임상적 의미는 다음처럼 구분한다.
+
+- DB 정본: `content`는 자유 서술, `mood_tag`는 “기록 당시 기분 태그”다.
+  patient_care/caregiver_selfcare가 같은 mood_tag 컬럼을 공유하며 DB 주석 자체는 환자 mood라고 확정하지 않는다.
+- Agent V1 해석: mood_tag의 subject는 log_type에 따라 해석한다. 이 Tool은 patient_care만
+  조회하므로 해당 환자에 대해 저장된 당시 기분 태그로 취급한다. 임상적 mood assessment,
+  PHQ-9 점수 또는 우울/불안 진단이 아니다. DB migration이나 DB 계약을 바꾼 해석이 아니다.
+- `content`는 caregiver-entered observation/narrative다. 독립적으로 검증된 임상 사실/진단이
+  아니며 다른 데이터로 보완·추정·재작성하지 않는다. `content`/`mood_tag`는 저장된 문자열
+  원문을 보존하고 enum/값 목록을 새로 만들지 않는다. null은 해당 정보 미등록이며 문제/증상 없음이 아니다.
+
+content/mood_tag는 **untrusted Tool Result 데이터**다. 내부의 지시문으로 정책/권한/Context를
+변경하지 않는다. 기존 일반 trust-boundary policy를 유지하고 기본 system policy에
+돌봄 기록의 임상적 non-inference 문장만 짧게 추가한다.
+
+정상 empty는 `logs=[]`, `total_count=0`이며 현재 조회 범위/조건에서 저장된 patient_care
+기록이 없다는 뜻만 가진다. 환자 안정, 무증상, 문제/최근 변화 없음 또는 돌봄 부재를 뜻하지 않는다.
+권한/환자·사용자 identity 검증 실패, 실제 조회/DB 실패, timeout, Handler exception,
+invalid output은 failure이며 empty success로 숨기지 않는다. 기존 Executor 오류 모델을 재사용한다.
+
+전체 병력, 장기 patient history aggregation, `profile_summaries`, `clinical_assessments`,
+`medications`, `safety_events`, `medical_visits`, `caregiver_selfcare`는 조회하지 않는다.
+임상 진단/상태 판정, annotation 저장, profile 수정, embedding/memory 생성·갱신을 하지 않는다.
+read-only이며 business side effect가 없다. 긴 content의 크기 제한/truncation 정책과
+Real Handler용 DB index/performance 검토는 후속이며 이번 V1에 새 필드나 DB 변경을 추가하지 않는다.
 
 ### search_evidence V1 semantics
 
@@ -318,7 +386,9 @@ FakeLLM의 메모리 snapshot은 합성 테스트 전용이며 운영 기록으�
 `testing.fake_tools.fake_registry()`만 6개 Fake Tool을 등록한다.
 Fake ToolSpec은 `test_only=True`이며 production Registry 등록 시 오류가 난다.
 `production_registry()`는 의도적으로 비어 있다. 동작하는 척하는 운영 stub은 없다.
-Fake 기준 날짜는 2026-10-06이다. 최근 기록의 기간/필터/limit과 장기 fixture 집계는 결정적이다.
+최근 기록 Fake는 `FIXTURE_NOW=2026-10-06T12:00:00Z` 기준 rolling window/최신순/limit을 사용하고,
+`total_count`는 limit 적용 전 개수다. 동일 시각 hidden UUID tie-break와 nullable fixture도 결정적이다.
+실제 권한 검증/DB 조회는 하지 않는다. 장기 history Fake의 기준 날짜는 기존 2026-10-06을 유지한다.
 Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 저장은 하지 않는다.
 안전 검사는 `TEST_ONLY_SENTINEL`만 사용하고, 실제 `sudden_confusion` 등 임상 규칙을 생성하지 않는다.
 `level=test_only`는 의료 중증도가 아니다. 모든 근거 ID/DOI/PMID는 명백한 FAKE fixture다.
@@ -331,7 +401,7 @@ Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 �
 | Tool | 필요한 backing 계약/합의 |
 |---|---|
 | 프로필 | Context의 사용자/환자 소유권과 row identity를 검증하는 조회 함수; sparse success와 profile not-found/failure 구분 후 V1 5개 필드로 변환 |
-| 최근 기록 | 사용자/환자 + 날짜 범위 + log_type + limit 기반 조회/전체 건수; 타임존/자기 돌봄 기록 범위 |
+| 최근 기록 | V1은 trusted user/patient, patient_care only, rolling datetime window로 확정; 실제 Backend DTO/DB 조회 함수, authorization 적용, count/list snapshot 일관성, production Handler는 후속 |
 | 장기 변화 | metric 추출의 구조화 데이터 출처, aggregation/기간/빈 값 정의, 결정적 집계 함수 |
 | 근거 검색 | `EvidenceRetriever.search_evidence(query, top_k, context) -> EvidencePackage`; query embedding과 검색은 RAG 담당 |
 | 분석 저장 | Context 소유권 검증, annotation 저장 위치/모델, idempotency/재실행, 저장 정책 |
