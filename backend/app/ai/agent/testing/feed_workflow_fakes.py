@@ -28,7 +28,7 @@ def build_feed_test_registry(*, query_validator: Callable[[AgentContext, c.Evide
 
 
 class FakeFeedDependencies:
-    """Opaque dict/tuple은 합성 내부 fixture이며 미래 Backend/V2 DTO가 아니다."""
+    """간병인 맞춤 Feed의 합성 fixture. Opaque dict/tuple은 Backend/V2 DTO가 아니다."""
 
     def __init__(self, context: AgentContext, *, cold_start=False, empty_logs=False,
                  fail_at=None, turns=None, drop_items=()):
@@ -38,14 +38,19 @@ class FakeFeedDependencies:
         self.drop_items = drop_items
         self.search_queries = []
         self.saved = []
+        self.saved_owners = []  # Test-only caregiver ownership 기록. 실제 저장/권한 계약이 아니다.
         self.receipt = object()
+        # 기존 patient_care Fake helper는 최근 돌봄 맥락의 합성 입력으로만 재사용한다.
+        # 여러 managed patient의 실제 조회/aggregation 방식은 확정하지 않는다.
         recent = fake_get_recent_care_logs(context, c.RecentCareLogsInput(days=30, limit=30))
         if empty_logs:
             recent = c.RecentCareLogsOutput(period=recent.period, logs=[], total_count=0)
         self.personalization = {
-            "profile": c.PatientProfileOutput(),  # 조회된 sparse profile을 가정한 합성 데이터
-            "recent": recent,
-            "memory": None if cold_start else "[FAKE] 장기 특성 fixture",
+            "caregiver_profile": "[FAKE] 간병인의 돌봄 관심 맥락",
+            # 복수 환자의 저장된 배경 데이터이며 Feed의 소유 대상/환자별 partition이 아니다.
+            "managed_patient_profiles": (c.PatientProfileOutput(), c.PatientProfileOutput()),
+            "recent_care_context": recent,
+            "long_term_summary": None if cold_start else "[FAKE] 간병인의 장기 돌봄 관심 요약",
         }
         self.plan = {"queries": ("synthetic care",)}
         self.agent_result = None
@@ -73,13 +78,14 @@ class FakeFeedDependencies:
 
     def pre_guardrail(self, context, personalization):
         self._enter("pre_guardrail", context, personalization)
-        if not isinstance(personalization["profile"], c.PatientProfileOutput):
-            raise ValueError("Missing required fixture profile")
-        recent = personalization["recent"]
+        if not isinstance(personalization["caregiver_profile"], str):
+            raise ValueError("Missing required synthetic caregiver context")
+        recent = personalization["recent_care_context"]
         if (recent.period.end_at - recent.period.start_at).total_seconds() != 30 * 24 * 3600:
             raise ValueError("Wrong fixture lookback window")
 
     def plan_retrieval(self, context, personalization):
+        # 간병인에게 유용한 연구 주제 planning의 호출 경계만 검증한다. 환자 상태 병합/추론 없음.
         self._enter("retrieval_planning", context, personalization)
         return self.plan
 
@@ -115,6 +121,7 @@ class FakeFeedDependencies:
     def persist(self, context, resolved):
         self._enter("persistence", context, resolved)
         self.saved.append(resolved)
+        self.saved_owners.append(context.user_id)
         return self.receipt
 
     def workflow(self, *, connect_fake_agent=True):

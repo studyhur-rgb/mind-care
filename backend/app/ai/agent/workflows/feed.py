@@ -1,4 +1,4 @@
-"""Feed 실행 골격. 미확정 데이터 계약과 production 연결은 dependency로 남긴다."""
+"""Caregiver/user-scoped 연구 뉴스 Feed 골격. 미확정 계약/연결은 dependency로 남긴다."""
 from typing import Callable, Literal, Protocol
 
 from ..agent_loop_runner import AgentLoopRunner
@@ -14,7 +14,11 @@ FeedStage = Literal[
 
 class FeedContextLoader(Protocol):
     def __call__(self, context: AgentContext, *, recent_days: int) -> object:
-        """권한 검증된 profile + 최근 기록 + optional patient memory를 제공한다."""
+        """권한 검증된 caregiver/user-scoped 개인화 Context를 제공한다.
+
+        간병인 맥락, 관리 환자들의 프로필, 최근 돌봄 맥락, optional user-scoped
+        장기 개인화 요약을 위한 opaque 경계이며 실제 반환 계약은 후속이다.
+        """
         ...
 
 
@@ -45,8 +49,9 @@ def _validate_feed_runner(runner: AgentLoopRunner) -> None:
 
 
 class FeedWorkflow:
-    """단계 순서/실패 중단을 소유한다. Runner 생성, Tool Loop, SQL은 소유하지 않는다.
+    """간병인 맞춤 Feed의 단계 순서/실패 중단을 소유한다. Runner/Tool Loop/SQL은 소유하지 않는다.
 
+    Feed ownership은 caregiver/user이며 managed patient 데이터는 돌봄 배경 Context다.
     모든 dependency는 실패/거부 시 예외를 발생시켜야 한다. opaque 반환값에 대해
     null/empty/item filtering 등 미확정 production 정책을 이 골격이 추측하지 않는다.
     """

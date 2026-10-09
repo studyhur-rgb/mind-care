@@ -43,6 +43,9 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertIs(deps.received["source_resolution"][2], deps.agent_result)
         self.assertIs(deps.received["persistence"][0], CONTEXT)
         self.assertEqual(deps.saved, [deps.agent_result["items"]])
+        # 합성 저장 결과는 간병인에게 귀속되며 managed patient별로 분할하지 않는다.
+        self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
+        self.assertNotEqual(deps.saved_owners, [CONTEXT.patient_id])
 
     def test_each_stage_failure_stops_later_dependencies(self):
         for position, stage in enumerate(STAGES):
@@ -58,25 +61,29 @@ class FeedWorkflowTests(unittest.TestCase):
                 if position < STAGES.index("agent_loop"):
                     self.assertEqual(deps.client.requests, [])
 
-    def test_cold_start_is_successful(self):
+    def test_caregiver_summary_cold_start_is_successful(self):
         deps = FakeFeedDependencies(CONTEXT, cold_start=True)
-        self.assertIsNone(deps.personalization["memory"])
+        self.assertIsNone(deps.personalization["long_term_summary"])
         self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
 
-    def test_zero_care_logs_is_successful(self):
+    def test_empty_recent_care_context_is_successful(self):
         deps = FakeFeedDependencies(CONTEXT, empty_logs=True)
-        self.assertEqual(deps.personalization["recent"].total_count, 0)
-        self.assertEqual(deps.personalization["recent"].logs, [])
+        self.assertEqual(deps.personalization["recent_care_context"].total_count, 0)
+        self.assertEqual(deps.personalization["recent_care_context"].logs, [])
         self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
 
-    def test_sparse_profile_is_successful(self):
+    def test_multiple_sparse_managed_profiles_are_care_context(self):
         deps = FakeFeedDependencies(CONTEXT)
-        self.assertIsNone(deps.personalization["profile"].name)
+        profiles = deps.personalization["managed_patient_profiles"]
+        self.assertEqual(len(profiles), 2)
+        self.assertTrue(all(profile.name is None for profile in profiles))
         self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
+        self.assertIs(deps.received["retrieval_planning"][1]["managed_patient_profiles"], profiles)
+        self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
 
-    def test_missing_required_profile_stops_before_llm(self):
+    def test_missing_required_caregiver_fixture_stops_before_llm(self):
         deps = FakeFeedDependencies(CONTEXT)
-        deps.personalization["profile"] = None
+        deps.personalization["caregiver_profile"] = None
         with self.assertRaises(FeedWorkflowError) as caught:
             deps.workflow().run(CONTEXT)
         self.assertEqual(caught.exception.stage, "pre_guardrail")
@@ -85,7 +92,7 @@ class FeedWorkflowTests(unittest.TestCase):
 
     def test_wrong_recent_window_stops_before_llm(self):
         deps = FakeFeedDependencies(CONTEXT)
-        recent = deps.personalization["recent"]
+        recent = deps.personalization["recent_care_context"]
         from datetime import timedelta
         recent.period.start_at += timedelta(days=1)
         with self.assertRaises(FeedWorkflowError) as caught:

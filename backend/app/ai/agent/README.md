@@ -12,6 +12,10 @@ Long-term Memory 로딩 정책, Guardrail 정책 결정, Workflow persistence �
 
 ## FeedWorkflow execution skeleton
 
+FeedWorkflow는 **caregiver/user-scoped personalized research news feed**를 위한 골격이다.
+Feed의 ownership과 personalization scope는 간병인/user다. 관리 환자들의 정보는 간병인의
+돌봄 상황을 이해하기 위한 Context이며 특정 환자 전용 Feed나 환자별 partition을 의미하지 않는다.
+
 `workflows/feed.py`의 `FeedWorkflow`는 다음 순서로 주입된 dependency를 호출한다.
 
 ```text
@@ -20,16 +24,32 @@ Context Load → Pre-Guardrail → Retrieval Planning → Agent Loop
 ```
 
 Context Loader는 trusted `AgentContext`와 `recent_days=30`을 받는다. Backend의
-authorization/ownership 검증 후 저장된 profile, 최근 30×24시간 기록, 현재 환자의 optional
-Long-term Memory를 제공하는 것이 후속 책임이다. 조회된 sparse profile, 기록 0건,
-Memory 부재는 정상일 수 있다. 저장된 profile은 최신 임상 사실이 아니며 최근 변화는
-날짜가 명확한 기록을 우선하고, Memory와의 충돌을 확정된 사실로 임의 병합하지 않는다.
+authorization/ownership 검증 후 다음 개인화 맥락을 제공하는 것이 후속 책임이다.
+
+- Caregiver Profile: 간병인의 돌봄 관계/부담/생활·관심 맥락
+- Managed Patient Profiles: 관리하는 여러 환자의 저장된 기본 돌봄 배경
+- Recent Care Context: 최근 30×24시간의 돌봄 관찰/상황. 여러 관리 환자와 관련될 수 있으며
+  실제 Backend 조회/aggregation 방식은 미정
+- Long-term Personalization Summary: optional caregiver/user-scoped 장기 개인화 요약.
+  특정 환자의 장기 임상 Memory가 아닌 간병인의 반복되는 돌봄 관심사/패턴을 위한 맥락
+
+위 구성은 개념적 의미이며 최종 `FeedPersonalizationContext`/Backend DTO가 아니다.
+Cold Start는 간병인/user의 장기 개인화 요약이 아직 없는 상태다. 다른 사용 가능한 Context로
+개인화를 계속할 수 있으며 정확한 fallback 정책은 후속이다. 조회된 sparse 관리 환자 프로필과
+최근 돌봄 기록 0건도 정상일 수 있다. 저장된 프로필은 최신 임상 사실이 아니며 최근 변화는
+날짜가 명확한 기록을 우선하고 장기 요약과의 충돌을 확정된 사실로 임의 병합하지 않는다.
 Pre-Guardrail dependency는 필수 Context/형식/조회 기간/크기/불필요한 식별정보를 검사한다.
-Care Logs와 Memory는 명령이 아닌 untrusted data로 전달해야 한다. 실제 loader/검증기/
+Care Logs와 장기 요약은 명령이 아닌 untrusted data로 전달해야 한다. 실제 loader/검증기/
 Prompt 연결은 아직 없으며 골격 자체가 접근 권한 또는 PII 제거를 보장하지 않는다.
+공유 `AgentContext`의 `patient_id`는 유지하며 Feed에서의 사용 여부는 후속 Context/wiring에서
+결정한다. 기존 환자 단위 Tool Contract를 caregiver aggregation 계약으로 바꾸지 않는다.
 
 Retrieval Planner는 한 번의 Direct Structured LLM으로 topic/reason/query 계획을 만드는
-후속 연결 경계다. 현재는 호출 위치와 실패 전파만 있다. Context, Plan, Agent 단계 결과,
+후속 연결 경계다. “이 간병인이 돌봄을 수행하면서 관심 있게 볼 가치가 있는 최신 연구 주제는
+무엇인가?”를 위 Context로 판단하는 방향이다. 특정 환자에게 연구 결과가 직접 적용된다고
+단정하거나 여러 환자 정보를 하나의 환자 상태로 병합하지 않는다. Query는 돌봄/건강 연구
+개념으로 일반화하고 환자 이름/직접 식별정보를 포함하지 않아야 한다.
+현재는 호출 위치와 실패 전파만 있다. Context, Plan, Agent 단계 결과,
 검증·승인·출처 조립 값과 persistence receipt는 opaque 내부 값이며 최종 DTO/API 계약이 아니다.
 Post-Guardrail에는 검증된 값과 Agent 단계 결과를 함께 전달하여 향후 선택 Evidence의
 내부 projection을 받을 경계를 남겼다. 실제 metadata는 Source Resolver가 원본에서 복사하며
@@ -56,8 +76,11 @@ Dependency는 실패/거부 시 예외를 발생시키며 `FeedWorkflowError.sta
 계약을 확정하지 않았다. DB 저장/중복 방지/idempotency도 미구현이다.
 
 후속 계약: `FeedPersonalizationContext`, `FeedRetrievalPlan`, `FeedAnswerV2`,
-`SelectedEvidenceContext`, patient-scoped Memory backing, EvidenceReference → 내부 paper_id,
-다중 source persistence. DB/RAG identity나 schema를 임시 값으로 대체하지 않았다.
+`SelectedEvidenceContext`, caregiver/user-scoped 장기 요약 backing, EvidenceReference → 내부 paper_id,
+다중 source persistence. 기존 user-scoped data backing 활용은 후속 integration에서 검토하며
+`profile_summaries`나 `chat_messages`의 활용 방식을 확정하지 않았다. Real Backend Context Loader,
+production Retrieval Planner/PII validation/persistence integration도 미구현이다.
+DB/RAG identity나 schema를 임시 값으로 대체하지 않았다.
 
 오프라인 골격 검증 (`backend/`):
 
