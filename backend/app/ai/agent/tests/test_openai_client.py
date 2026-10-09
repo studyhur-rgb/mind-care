@@ -8,7 +8,7 @@ import httpx
 from openai import OpenAI
 
 from ..clients.openai_client import OpenAIClient
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..registry import ToolName, production_registry
 from ..testing.fake_tools import fake_registry
 from .test_workflows import CONTEXT
@@ -36,7 +36,7 @@ class OpenAIClientTests(unittest.TestCase):
         self.addCleanup(sdk.close)
         client = OpenAIClient(sdk, model="configured-test-model", timeout_seconds=0.25)
         with patch.object(OpenAI, "_calculate_retry_timeout", return_value=0):
-            result = AgentOrchestrator(client, production_registry()).run("synthetic", CONTEXT)
+            result = AgentLoopRunner(client, production_registry()).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "provider_error")
         self.assertEqual(len(requests), 1)
         self.assertEqual(set(requests[0].extensions["timeout"].values()), {0.25})
@@ -48,7 +48,7 @@ class OpenAIClientTests(unittest.TestCase):
         def transport(request):
             requests.append(request)
             return httpx.Response(200, json=completion({"role": "assistant", "content": "done"}))
-        result = AgentOrchestrator(self.sdk(transport), production_registry(), request_timeout_seconds=1).run("synthetic", CONTEXT)
+        result = AgentLoopRunner(self.sdk(transport), production_registry(), request_timeout_seconds=1).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "completed")
         for timeout in requests[0].extensions["timeout"].values():
             self.assertGreater(timeout, 0)
@@ -73,7 +73,7 @@ class OpenAIClientTests(unittest.TestCase):
         client = ObservedClient(sdk, model="configured-test-model")
         with patch.object(OpenAI, "_calculate_retry_timeout", return_value=0):
             try:
-                result = AgentOrchestrator(client, production_registry(), request_timeout_seconds=0.1).run("synthetic", CONTEXT)
+                result = AgentLoopRunner(client, production_registry(), request_timeout_seconds=0.1).run("synthetic", CONTEXT)
                 self.assertEqual(result.status, "failed")
                 self.assertEqual(result.errors[-1].code, "request_timeout")
                 self.assertEqual(len(requests), 1)
@@ -98,12 +98,14 @@ class OpenAIClientTests(unittest.TestCase):
                     "id": "call_1", "type": "function", "function": {
                         "name": ToolName.PATIENT_PROFILE.value, "arguments": "{}"}}]}, "tool_calls"))
             return httpx.Response(200, json=completion({"role": "assistant", "content": "완료"}))
-        result = AgentOrchestrator(self.sdk(transport), fake_registry()).run("  원문\n", CONTEXT)
+        result = AgentLoopRunner(self.sdk(transport), fake_registry()).run("  원문\n", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0]["model"], "configured-test-model")
         self.assertEqual(requests[0]["messages"][2]["content"], "  원문\n")
-        self.assertEqual(len(requests[0]["tools"]), 6)
+        self.assertEqual({tool["function"]["name"] for tool in requests[0]["tools"]},
+                         {"get_patient_profile", "get_recent_care_logs", "search_evidence"})
+        self.assertEqual(len(requests[0]["tools"]), 3)
         followup = requests[1]["messages"]
         self.assertEqual(followup[-2]["tool_calls"][0]["function"]["arguments"], "{}")
         self.assertEqual(followup[-1]["tool_call_id"], "call_1")
@@ -115,7 +117,7 @@ class OpenAIClientTests(unittest.TestCase):
         def transport(request):
             requests.append(json.loads(request.content))
             return httpx.Response(200, json=completion({"role": "assistant", "content": "안녕"}))
-        result = AgentOrchestrator(self.sdk(transport), production_registry()).run("안녕", CONTEXT)
+        result = AgentLoopRunner(self.sdk(transport), production_registry()).run("안녕", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertNotIn("tools", requests[0])
         self.assertNotIn("tool_choice", requests[0])
@@ -123,14 +125,14 @@ class OpenAIClientTests(unittest.TestCase):
     def test_provider_error_not_exposed(self):
         def transport(request):
             return httpx.Response(401, json={"error": {"message": "PRIVATE secret", "type": "auth_error"}})
-        result = AgentOrchestrator(self.sdk(transport), production_registry()).run("질문", CONTEXT)
+        result = AgentLoopRunner(self.sdk(transport), production_registry()).run("질문", CONTEXT)
         self.assertEqual(result.status, "provider_error")
         self.assertNotIn("PRIVATE", result.model_dump_json())
 
     def test_truncated_provider_response_is_not_final_answer(self):
         def transport(request):
             return httpx.Response(200, json=completion({"role": "assistant", "content": "잘린 답변"}, "length"))
-        result = AgentOrchestrator(self.sdk(transport), production_registry()).run("질문", CONTEXT)
+        result = AgentLoopRunner(self.sdk(transport), production_registry()).run("질문", CONTEXT)
         self.assertEqual(result.status, "provider_error")
         self.assertIsNone(result.final_answer)
 
@@ -143,7 +145,7 @@ class OpenAIClientTests(unittest.TestCase):
                     "id": "call_1", "type": "function", "function": {
                         "name": ToolName.PATIENT_PROFILE.value, "arguments": "{invalid"}}]}, "tool_calls"))
             return httpx.Response(200, json=completion({"role": "assistant", "content": "복구"}))
-        result = AgentOrchestrator(self.sdk(transport), fake_registry()).run("질문", CONTEXT)
+        result = AgentLoopRunner(self.sdk(transport), fake_registry()).run("질문", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.errors[0].code, "invalid_arguments")
         self.assertEqual(requests[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"], "{invalid")

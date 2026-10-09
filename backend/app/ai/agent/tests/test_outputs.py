@@ -8,7 +8,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from .._execution import RequestTimeout, request_deadline
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..outputs import (ChatAnswerV1, EvidenceReference, FeedAnswerV1, PaperDetailContentV1,
                        StructuredAgentResult, resolve_evidence_references, validate_final_output)
 from ..prompts import DefaultPromptBuilder
@@ -318,7 +318,7 @@ class NestedResultValidationTests(TestCase):
 class StructuredWorkflowTests(TestCase):
     def run_output(self, payload, model=ChatAnswerV1, preceding=(), registry=None, **options):
         client = FakeLLMClient([*preceding, ModelTurn(text=json.dumps(payload, ensure_ascii=False))])
-        engine = AgentOrchestrator(client, registry if registry is not None else fake_registry(), **options)
+        engine = AgentLoopRunner(client, registry if registry is not None else fake_registry(), **options)
         return engine.run_structured("[FAKE] 합성 질문", CONTEXT, output_model=model), client
 
     def search(self, identifier="search_1"):
@@ -326,7 +326,7 @@ class StructuredWorkflowTests(TestCase):
 
     def test_legacy_result_and_json_shape_are_unchanged(self):
         raw = "  기존 답변\n"
-        result = AgentOrchestrator(FakeLLMClient([ModelTurn(text=raw)]), fake_registry()).run("원문", CONTEXT)
+        result = AgentLoopRunner(FakeLLMClient([ModelTurn(text=raw)]), fake_registry()).run("원문", CONTEXT)
         self.assertIs(type(result), AgentResult)
         self.assertEqual(result.final_answer, raw)
         self.assertEqual(set(result.model_dump()), {"status", "request_id", "final_answer", "tool_rounds",
@@ -447,7 +447,7 @@ class StructuredWorkflowTests(TestCase):
         client = FakeLLMClient([self.search(), self.search("search_2"), ModelTurn(text="legacy answer")])
         with patch.object(builder, "build_final_response_context",
                           wraps=builder.build_final_response_context) as aggregate:
-            result = AgentOrchestrator(client, fake_registry(), prompt_builder=builder).run("  원문\n", CONTEXT)
+            result = AgentLoopRunner(client, fake_registry(), prompt_builder=builder).run("  원문\n", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.final_answer, "legacy answer")
         self.assertEqual(aggregate.call_count, 3)
@@ -464,7 +464,7 @@ class StructuredWorkflowTests(TestCase):
 
     def test_references_do_not_survive_between_requests_on_same_engine(self):
         payload = json.dumps(chat([ref()]))
-        engine = AgentOrchestrator(FakeLLMClient([self.search(), ModelTurn(text=payload),
+        engine = AgentLoopRunner(FakeLLMClient([self.search(), ModelTurn(text=payload),
                                                  ModelTurn(text=payload)]), fake_registry())
         first = engine.run_structured("synthetic", CONTEXT, output_model=ChatAnswerV1)
         second = engine.run_structured("synthetic", CONTEXT, output_model=ChatAnswerV1)
@@ -504,7 +504,7 @@ class StructuredWorkflowTests(TestCase):
     def test_malformed_and_wrong_type_are_sanitized_without_retry(self):
         for text in ("{PRIVATE malformed", json.dumps(feed(0)), json.dumps({**chat(), "answer": " "})):
             client = FakeLLMClient([ModelTurn(text=text), ModelTurn(text=json.dumps(chat()))])
-            result = AgentOrchestrator(client, fake_registry()).run_structured("synthetic", CONTEXT,
+            result = AgentLoopRunner(client, fake_registry()).run_structured("synthetic", CONTEXT,
                                                                             output_model=ChatAnswerV1)
             self.assertEqual(result.execution.status, "invalid_response")
             self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")
@@ -512,7 +512,7 @@ class StructuredWorkflowTests(TestCase):
             self.assertNotIn("PRIVATE", result.model_dump_json())
 
     def test_output_model_is_explicit_and_limited_to_final_chat_feed(self):
-        engine = AgentOrchestrator(FakeLLMClient([]), fake_registry())
+        engine = AgentLoopRunner(FakeLLMClient([]), fake_registry())
         for model in (None, AgentResult, PaperDetailContentV1, "chat"):
             with self.subTest(model=model), self.assertRaises(ValueError):
                 engine.run_structured("synthetic", CONTEXT, output_model=model)
@@ -536,7 +536,7 @@ class StructuredWorkflowTests(TestCase):
         for turns, options, status in (([RuntimeError("PRIVATE failure")], {}, "provider_error"),
                                       ([self.search(), self.search("search_2")],
                                        {"max_tool_rounds": 1}, "limit_reached")):
-            result = AgentOrchestrator(FakeLLMClient(turns), fake_registry(), **options).run_structured(
+            result = AgentLoopRunner(FakeLLMClient(turns), fake_registry(), **options).run_structured(
                 "synthetic", CONTEXT, output_model=ChatAnswerV1)
             self.assertEqual(result.execution.status, status)
             self.assertIsNone(result.output)
@@ -552,7 +552,7 @@ class StructuredWorkflowTests(TestCase):
             finally:
                 finished.set()
         try:
-            with patch("app.ai.agent.orchestrator.validate_final_output", side_effect=slow_validation):
+            with patch("app.ai.agent.agent_loop_runner.validate_final_output", side_effect=slow_validation):
                 result, _ = self.run_output(chat(), request_timeout_seconds=0.05)
             self.assertEqual(result.execution.status, "failed")
             self.assertEqual(result.execution.errors[-1].code, "request_timeout")
@@ -565,14 +565,14 @@ class StructuredWorkflowTests(TestCase):
 
     def test_result_validation_failure_drops_content_and_sources(self):
         client = FakeLLMClient([self.search(), ModelTurn(text=json.dumps(chat([ref()])))])
-        engine = AgentOrchestrator(client, fake_registry())
+        engine = AgentLoopRunner(client, fake_registry())
         calls = []
         def factory(**kwargs):
             calls.append(kwargs)
             if len(calls) == 1:
                 return StructuredAgentResult(**{**kwargs, "sources": []})
             return StructuredAgentResult(**kwargs)
-        with patch("app.ai.agent.orchestrator.StructuredAgentResult", side_effect=factory):
+        with patch("app.ai.agent.agent_loop_runner.StructuredAgentResult", side_effect=factory):
             result = engine.run_structured("synthetic", CONTEXT, output_model=ChatAnswerV1)
         self.assertEqual(result.execution.status, "failed")
         self.assertEqual(result.execution.errors[-1].code, "result_validation_error")
@@ -597,7 +597,7 @@ class StructuredWorkflowTests(TestCase):
                         return StructuredAgentResult(**{**kwargs, "output": chat()})
                     return StructuredAgentResult(**kwargs)
                 try:
-                    with patch("app.ai.agent.orchestrator.StructuredAgentResult", side_effect=factory):
+                    with patch("app.ai.agent.agent_loop_runner.StructuredAgentResult", side_effect=factory):
                         result, _ = self.run_output(chat([ref()]), preceding=[self.search()],
                                                     request_timeout_seconds=0.1)
                     self.assertTrue(started.is_set())
@@ -618,7 +618,7 @@ class StructuredWorkflowTests(TestCase):
             if kwargs["execution"].status == "completed":
                 raise RequestTimeout("expired during final validation")
             return StructuredAgentResult(**kwargs)
-        with patch("app.ai.agent.orchestrator.StructuredAgentResult", side_effect=factory):
+        with patch("app.ai.agent.agent_loop_runner.StructuredAgentResult", side_effect=factory):
             result, _ = self.run_output(chat())
         self.assertEqual(result.execution.status, "failed")
         self.assertEqual(result.execution.errors[-1].code, "request_timeout")
@@ -638,8 +638,8 @@ class StructuredWorkflowTests(TestCase):
                     finished.set()
             return AgentResult(**kwargs)
         try:
-            with patch("app.ai.agent.orchestrator.AgentResult", side_effect=factory):
-                result = AgentOrchestrator(FakeLLMClient([ModelTurn(text="PRIVATE late answer")]),
+            with patch("app.ai.agent.agent_loop_runner.AgentResult", side_effect=factory):
+                result = AgentLoopRunner(FakeLLMClient([ModelTurn(text="PRIVATE late answer")]),
                                            fake_registry(), request_timeout_seconds=0.1).run("synthetic", CONTEXT)
             self.assertTrue(started.is_set())
             self.assertEqual(result.status, "failed")

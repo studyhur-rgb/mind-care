@@ -1,7 +1,7 @@
 """DB/API key 없는 명시적 Fake 데모: python -m app.ai.agent.testing.demo."""
 from uuid import UUID
 
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..registry import ToolName
 from ..schemas import AgentContext, ModelTurn, ToolCall
 from .fake_llm import FakeLLMClient
@@ -16,7 +16,7 @@ def main():
                                       arguments={"query": "dementia sleep disturbance", "top_k": 5})]),
         ModelTurn(text="[FAKE 데모] 합성 돌봄 기록과 합성 근거를 확인했습니다. 실제 의료 판단이 아닙니다."),
     ])
-    result = AgentOrchestrator(client, fake_registry()).run("최근 이 환자의 상태를 보고 관련 정보를 알려줘.", context)
+    result = AgentLoopRunner(client, fake_registry()).run("최근 이 환자의 상태를 보고 관련 정보를 알려줘.", context)
     print(result.model_dump_json(indent=2))
     if result.status != "completed":
         raise SystemExit(1)

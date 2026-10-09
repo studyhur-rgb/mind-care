@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from app.ai.retrieval.search import EvidenceItem as RAGEvidenceItem
 from app.ai.retrieval.search import EvidencePackage as RAGEvidencePackage
 
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..executor import ToolExecutor
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec, production_registry
 from ..schemas import ModelTurn
@@ -147,7 +147,7 @@ class EvidenceContractTests(TestCase):
                     lambda context, args: package),), mode="test")
                 client = FakeLLMClient([tool_turn(call(ToolName.SEARCH_EVIDENCE, {"query": "synthetic"})),
                                         ModelTurn(text="synthetic final answer")])
-                result = AgentOrchestrator(client, registry).run("synthetic", CONTEXT)
+                result = AgentLoopRunner(client, registry).run("synthetic", CONTEXT)
                 self.assertLess(len(package.evidence), c.EvidenceSearchInput(query="synthetic").top_k)
                 self.assertEqual(result.status, "completed")
                 self.assertEqual(result.errors, [])

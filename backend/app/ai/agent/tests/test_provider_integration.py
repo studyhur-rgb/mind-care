@@ -3,7 +3,7 @@ import os
 import unittest
 
 from ..clients.openai_client import OpenAIClient
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..registry import production_registry
 from .test_workflows import CONTEXT
 
@@ -19,7 +19,7 @@ class ProviderIntegrationTests(unittest.TestCase):
         if not settings.openai_api_key or not model:
             self.skipTest("Existing API key binding and explicit model are required")
         with OpenAI(api_key=settings.openai_api_key, timeout=20, max_retries=0) as sdk:
-            result = AgentOrchestrator(OpenAIClient(sdk, model=model, timeout_seconds=20), production_registry()).run(
+            result = AgentLoopRunner(OpenAIClient(sdk, model=model, timeout_seconds=20), production_registry()).run(
                 "연결 확인입니다. 짧게 인사해 주세요.", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertTrue(result.final_answer)

@@ -78,7 +78,7 @@ class ToolExecutor:
                               success=error is None, data=data, error=error)
         count = None
         if data is not None:
-            for key in ("logs", "evidence", "data", "matched_rules"):
+            for key in ("logs", "evidence", "data"):
                 if isinstance(data.get(key), list):
                     count = len(data[key])
                     break

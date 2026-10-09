@@ -13,7 +13,7 @@ from .schemas import AgentContext, AgentError, AgentResult, AgentState, ModelTur
 from .tools.contracts import EvidencePackage
 
 
-class AgentOrchestrator:
+class AgentLoopRunner:
     def __init__(self, client: LLMClient, registry: ToolRegistry, *,
                  prompt_builder: PromptBuilder | None = None,
                  max_tool_rounds: int = 5, max_total_tool_calls: int = 10,

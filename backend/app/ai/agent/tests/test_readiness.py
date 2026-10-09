@@ -12,7 +12,7 @@ from pydantic import BaseModel, ValidationError
 
 from .. import _execution
 from ..executor import ToolExecutor
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..prompts import DefaultPromptBuilder
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import AgentResult, ModelTurn, ToolOutcome, ToolTrace
@@ -41,7 +41,7 @@ class TimeoutTests(TestCase):
                     started.append(True)
                     raise exception
                 client = FakeLLMClient([tool_turn(call(), call(identifier="call_2")), ModelTurn(text="must not run")])
-                result = AgentOrchestrator(client, registry_with(handler)).run("synthetic", CONTEXT)
+                result = AgentLoopRunner(client, registry_with(handler)).run("synthetic", CONTEXT)
                 self.assertEqual(result.status, "failed")
                 self.assertEqual(result.errors[-1].code, "tool_timeout")
                 self.assertEqual(result.total_tool_calls, 1)
@@ -59,7 +59,7 @@ class TimeoutTests(TestCase):
                     started.append(True)
                     raise exception
                 client = FakeLLMClient([tool_turn(call(), call(identifier="call_2")), ModelTurn(text="recovered")])
-                result = AgentOrchestrator(client, registry_with(handler)).run("synthetic", CONTEXT)
+                result = AgentLoopRunner(client, registry_with(handler)).run("synthetic", CONTEXT)
                 self.assertEqual(result.status, "completed")
                 self.assertEqual([error.code for error in result.errors], ["tool_exception", "tool_exception"])
                 self.assertEqual(len(started), 2)
@@ -94,7 +94,7 @@ class TimeoutTests(TestCase):
             return c.PatientProfileOutput()
         client = FakeLLMClient([tool_turn(call(), call(identifier="call_2")), ModelTurn(text="must not run")])
         try:
-            result = AgentOrchestrator(client, registry_with(handler), tool_timeout_seconds=0.03,
+            result = AgentLoopRunner(client, registry_with(handler), tool_timeout_seconds=0.03,
                                        request_timeout_seconds=1).run("synthetic", CONTEXT)
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.errors[-1].code, "tool_timeout")
@@ -113,7 +113,7 @@ class TimeoutTests(TestCase):
                 return ModelTurn(text="late answer")
         try:
             started = monotonic()
-            result = AgentOrchestrator(SlowClient(), fake_registry(), request_timeout_seconds=0.04).run("synthetic", CONTEXT)
+            result = AgentLoopRunner(SlowClient(), fake_registry(), request_timeout_seconds=0.04).run("synthetic", CONTEXT)
             self.assertLess(monotonic() - started, 0.5)
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.errors[-1].code, "request_timeout")
@@ -129,7 +129,7 @@ class TimeoutTests(TestCase):
             return c.PatientProfileOutput()
         client = FakeLLMClient([tool_turn(call())])
         try:
-            result = AgentOrchestrator(client, registry_with(handler), tool_timeout_seconds=1,
+            result = AgentLoopRunner(client, registry_with(handler), tool_timeout_seconds=1,
                                        request_timeout_seconds=0.05).run("synthetic", CONTEXT)
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.errors[-1].code, "request_timeout")
@@ -143,7 +143,7 @@ class TimeoutTests(TestCase):
                 sleep(0.12)
                 return super().generate(messages, tools)
         client = DelayedClient([tool_turn(call()), ModelTurn(text="late answer")])
-        result = AgentOrchestrator(client, fake_registry(), request_timeout_seconds=0.2).run("synthetic", CONTEXT)
+        result = AgentLoopRunner(client, fake_registry(), request_timeout_seconds=0.2).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.errors[-1].code, "request_timeout")
         self.assertEqual(result.total_tool_calls, 1)
@@ -155,7 +155,7 @@ class TimeoutTests(TestCase):
                 release.wait(2)
                 return super().build_initial_messages(user_input, context)
         try:
-            result = AgentOrchestrator(FakeLLMClient([]), fake_registry(), prompt_builder=SlowBuilder(),
+            result = AgentLoopRunner(FakeLLMClient([]), fake_registry(), prompt_builder=SlowBuilder(),
                                        request_timeout_seconds=0.03).run("synthetic", CONTEXT)
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.errors[-1].code, "request_timeout")
@@ -175,7 +175,7 @@ class TimeoutTests(TestCase):
     def test_handler_capacity_is_separate_from_executor_capacity(self):
         client = FakeLLMClient([tool_turn(call()), ModelTurn(text="final")])
         with patch.object(_execution, "_WORKER_SLOTS", BoundedSemaphore(1)):
-            result = AgentOrchestrator(client, fake_registry(), request_timeout_seconds=1).run("synthetic", CONTEXT)
+            result = AgentLoopRunner(client, fake_registry(), request_timeout_seconds=1).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "completed")
 
     def test_deadline_isolated_between_concurrent_runs(self):
@@ -186,12 +186,12 @@ class TimeoutTests(TestCase):
                 release.wait(2)
                 return ModelTurn(text="late")
         results = []
-        thread = Thread(target=lambda: results.append(AgentOrchestrator(
+        thread = Thread(target=lambda: results.append(AgentLoopRunner(
             SlowClient(), fake_registry(), request_timeout_seconds=0.05).run("synthetic", CONTEXT)))
         try:
             thread.start()
             self.assertTrue(started.wait(1))
-            fast = AgentOrchestrator(FakeLLMClient([ModelTurn(text="fast")]), fake_registry(),
+            fast = AgentLoopRunner(FakeLLMClient([ModelTurn(text="fast")]), fake_registry(),
                                      request_timeout_seconds=1).run("synthetic", CONTEXT)
             thread.join(1)
             self.assertFalse(thread.is_alive())
@@ -217,12 +217,12 @@ class FailureBoundaryTests(TestCase):
             with self.subTest(method=method):
                 builder = DefaultPromptBuilder()
                 with patch.object(builder, method, side_effect=RuntimeError("PRIVATE prompt")):
-                    engine = AgentOrchestrator(FakeLLMClient([tool_turn(call()), ModelTurn(text="final")]),
+                    engine = AgentLoopRunner(FakeLLMClient([tool_turn(call()), ModelTurn(text="final")]),
                                                fake_registry(), prompt_builder=builder)
                     self.assert_failed(engine, "prompt_builder_error")
 
     def test_executor_failure_returns_failed(self):
-        engine = AgentOrchestrator(FakeLLMClient([tool_turn(call())]), fake_registry())
+        engine = AgentLoopRunner(FakeLLMClient([tool_turn(call())]), fake_registry())
         with patch.object(engine.executor, "execute", side_effect=RuntimeError("PRIVATE executor")):
             self.assert_failed(engine, "executor_error")
 
@@ -242,7 +242,7 @@ class FailureBoundaryTests(TestCase):
         for returned in invalid:
             with self.subTest(returned=type(returned).__name__):
                 client = FakeLLMClient([tool_turn(call(), call(identifier="call_2")), ModelTurn(text="must not run")])
-                engine = AgentOrchestrator(client, fake_registry())
+                engine = AgentLoopRunner(client, fake_registry())
                 with patch.object(engine.executor, "execute", return_value=returned) as execute:
                     self.assert_failed(engine, "executor_error")
                 self.assertEqual(execute.call_count, 1)
@@ -250,21 +250,21 @@ class FailureBoundaryTests(TestCase):
 
     def test_result_creation_failure_has_a_valid_sanitized_fallback(self):
         client = FakeLLMClient([ModelTurn(text="PRIVATE final answer")])
-        engine = AgentOrchestrator(client, fake_registry())
+        engine = AgentLoopRunner(client, fake_registry())
         calls = []
         def result_factory(**kwargs):
             calls.append(kwargs)
             if len(calls) == 1:
                 return AgentResult(**{**kwargs, "called_tools": [{"PRIVATE": "invalid trace"}]})
             return AgentResult(**kwargs)
-        with patch("app.ai.agent.orchestrator.AgentResult", side_effect=result_factory):
+        with patch("app.ai.agent.agent_loop_runner.AgentResult", side_effect=result_factory):
             result = self.assert_failed(engine, "result_validation_error")
         self.assertEqual(len(calls), 2)
         self.assertEqual(result.called_tools, [])
 
     def test_executor_model_instances_are_revalidated(self):
         client = FakeLLMClient([tool_turn(call()), ModelTurn(text="done")])
-        engine = AgentOrchestrator(client, fake_registry())
+        engine = AgentLoopRunner(client, fake_registry())
         outcome, trace = engine.executor.execute(call(), CONTEXT)
         with patch.object(engine.executor, "execute", return_value=(outcome, trace)):
             result = engine.run("synthetic", CONTEXT)
@@ -273,12 +273,12 @@ class FailureBoundaryTests(TestCase):
 
     def test_registry_failure_inside_run_returns_failed(self):
         registry = fake_registry()
-        engine = AgentOrchestrator(FakeLLMClient([]), registry)
+        engine = AgentLoopRunner(FakeLLMClient([]), registry)
         with patch.object(registry, "definitions", side_effect=RuntimeError("PRIVATE schema")):
             self.assert_failed(engine, "registry_error")
 
     def test_invalid_evidence_from_executor_returns_failed(self):
-        engine = AgentOrchestrator(FakeLLMClient([tool_turn(call(ToolName.SEARCH_EVIDENCE, {"query": "synthetic"}))]),
+        engine = AgentLoopRunner(FakeLLMClient([tool_turn(call(ToolName.SEARCH_EVIDENCE, {"query": "synthetic"}))]),
                                    fake_registry())
         outcome = ToolOutcome(call_id="call_1", tool_name=ToolName.SEARCH_EVIDENCE.value, success=True,
                               data={"query": "synthetic", "evidence": [{"PRIVATE": "invalid"}]})
@@ -293,7 +293,7 @@ class FailureBoundaryTests(TestCase):
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.error.code, "invalid_output")
         self.assertIsNone(outcome.data)
-        result = AgentOrchestrator(client, registry).run("synthetic", CONTEXT)
+        result = AgentLoopRunner(client, registry).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertEqual([error.code for error in result.errors], ["invalid_output"])
         self.assertNotIn("PRIVATE", result.model_dump_json())
@@ -355,39 +355,16 @@ class RegistrationAndConfigurationTests(TestCase):
         for name in ("max_tool_rounds", "max_total_tool_calls"):
             for value in (0, -1, True, False, 1.0, 1.5, float("nan"), float("inf"), "1", None):
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
-                    AgentOrchestrator(FakeLLMClient([]), fake_registry(), **{name: value})
+                    AgentLoopRunner(FakeLLMClient([]), fake_registry(), **{name: value})
 
     def test_timeout_configuration_requires_positive_finite_seconds(self):
         for name in ("tool_timeout_seconds", "request_timeout_seconds"):
             for value in (0, -1, True, False, float("nan"), float("inf"), 10**1000, "1", None):
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
-                    AgentOrchestrator(FakeLLMClient([]), fake_registry(), **{name: value})
+                    AgentLoopRunner(FakeLLMClient([]), fake_registry(), **{name: value})
 
 
 class OutputConsistencyTests(TestCase):
-    def test_history_summary_matches_data(self):
-        points = [{"period_start": "2026-09-21", "count": 3}, {"period_start": "2026-09-28", "count": 6}]
-        base = {"metric": "night_awakening", "aggregation": "weekly", "data": points}
-        c.PatientHistoryOutput(**base, summary={"latest_value": 6, "previous_value": 3, "change": 3})
-        with self.assertRaises(ValidationError):
-            c.PatientHistoryOutput(**base, summary={"latest_value": 999, "previous_value": 888, "change": 111})
-
-    def test_history_requires_ordered_unique_periods(self):
-        for dates in (["2026-09-28", "2026-09-21"], ["2026-09-21", "2026-09-21"]):
-            with self.subTest(dates=dates), self.assertRaises(ValidationError):
-                c.PatientHistoryOutput(metric="synthetic", aggregation="weekly",
-                    data=[{"period_start": d, "count": n} for d, n in zip(dates, (3, 6))],
-                    summary={"latest_value": 6, "previous_value": 3, "change": 3})
-
-    def test_empty_and_single_point_history_summary(self):
-        for points, summary in [([], (0, 0, 0)), ([{"period_start": "2026-09-28", "count": 6}], (6, 0, 6))]:
-            with self.subTest(points=points):
-                c.PatientHistoryOutput(metric="synthetic", aggregation="weekly", data=points,
-                    summary=dict(zip(("latest_value", "previous_value", "change"), summary)))
-                with self.assertRaises(ValidationError):
-                    c.PatientHistoryOutput(metric="synthetic", aggregation="weekly", data=points,
-                        summary={"latest_value": 1, "previous_value": 1, "change": 0})
-
     def logs(self, timestamps, total=None):
         return c.RecentCareLogsOutput(period={"start_at": "2026-10-01T00:00:00Z", "end_at": "2026-10-06T00:00:00Z"},
             logs=[{"logged_at": timestamp} for timestamp in timestamps],
@@ -411,30 +388,3 @@ class OutputConsistencyTests(TestCase):
     def test_log_total_cannot_be_smaller_than_returned_count(self):
         with self.assertRaises(ValidationError):
             self.logs(["2026-10-05T01:00:00+09:00"], total=0)
-
-    def test_annotation_failure_does_not_require_id_but_success_does(self):
-        self.assertIsNone(c.AIAnnotationOutput(success=False).annotation_id)
-        self.assertIsNone(c.AIAnnotationOutput(success=False, annotation_id=None).annotation_id)
-        c.AIAnnotationOutput(success=True, annotation_id=UUID(int=3))
-        with self.assertRaises(ValidationError):
-            c.AIAnnotationOutput(success=True)
-
-    def test_annotation_business_failure_survives_executor_validation(self):
-        registry = registry_with(lambda context, args: {"success": False}, ToolName.SAVE_AI_ANNOTATION)
-        outcome, _ = ToolExecutor(registry).execute(call(ToolName.SAVE_AI_ANNOTATION,
-                                                        {"log_id": str(UUID(int=3)), "summary": "synthetic"}), CONTEXT)
-        self.assertTrue(outcome.success)  # execution success, not business success
-        self.assertEqual(outcome.data, {"success": False, "annotation_id": None})
-
-    def test_safety_flag_relationships(self):
-        c.SafetyFlagsOutput(flagged=False, level="none", matched_rules=[])
-        c.SafetyFlagsOutput(flagged=True, level="test_only", matched_rules=["TEST_RULE"])
-        invalid = [dict(flagged=True, level="none", matched_rules=[]),
-                   dict(flagged=True, level="test_only", matched_rules=[]),
-                   dict(flagged=False, level="test_only", matched_rules=[]),
-                   dict(flagged=False, level="none", matched_rules=["TEST_RULE"]),
-                   dict(flagged=True, level="test_only", matched_rules=["TEST_RULE", "TEST_RULE"]),
-                   dict(flagged=True, level="test_only", matched_rules=[" "])]
-        for data in invalid:
-            with self.subTest(data=data), self.assertRaises(ValidationError):
-                c.SafetyFlagsOutput(**data)

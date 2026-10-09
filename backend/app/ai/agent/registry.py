@@ -12,10 +12,7 @@ from .tools import contracts as c
 class ToolName(str, Enum):
     PATIENT_PROFILE = "get_patient_profile"
     RECENT_CARE_LOGS = "get_recent_care_logs"
-    PATIENT_HISTORY = "get_patient_history"
     SEARCH_EVIDENCE = "search_evidence"
-    SAVE_AI_ANNOTATION = "save_ai_annotation"
-    SAFETY_FLAGS = "check_safety_flags"
 
 
 @dataclass(frozen=True)
@@ -43,16 +40,10 @@ TOOL_CONTRACTS = {
                      "개인화 context가 필요할 때 trusted server Context가 지정한 현재 환자에 대해 간병인이 저장한 최근 patient_care 돌봄 기록을 읽기 전용으로 조회한다. "
                      "반환된 기록은 간병인의 관찰·서술이며 임상적으로 검증된 사실이나 진단으로 간주하지 않는다.",
                      c.RecentCareLogsInput, c.RecentCareLogsOutput),
-        ToolContract(ToolName.PATIENT_HISTORY, "관찰 지표의 집계 시계열 조회. 집계 계약 미연결.",
-                     c.PatientHistoryInput, c.PatientHistoryOutput),
         ToolContract(ToolName.SEARCH_EVIDENCE,
                      "연구·의학적 근거가 필요할 때 현재 corpus에서 치매/MCI 및 인지건강 관련 연구 근거 후보를 검색한다. "
                      "검색 결과나 relevance_score만으로 의료 주장 진위 또는 evidence level을 판단하지 않는다.",
                      c.EvidenceSearchInput, c.EvidencePackage),
-        ToolContract(ToolName.SAVE_AI_ANNOTATION, "현재 환자 소유 기록의 구조화 분석 저장.",
-                     c.AIAnnotationInput, c.AIAnnotationOutput),
-        ToolContract(ToolName.SAFETY_FLAGS, "승인된 규칙 검사. 현재 테스트 전용 규칙만 존재.",
-                     c.SafetyFlagsInput, c.SafetyFlagsOutput),
     )
 }
 
@@ -104,5 +95,5 @@ class ToolRegistry:
 
 
 def production_registry() -> ToolRegistry:
-    """Backing 서비스가 없는 6개 Tool은 현재 운영에 노출하지 않는다."""
+    """Backing 서비스가 없는 3개 Tool은 현재 운영에 노출하지 않는다."""
     return ToolRegistry()

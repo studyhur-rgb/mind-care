@@ -1,7 +1,7 @@
 """Chat/Feed V1 오프라인 예시. 합성 데이터만 사용: python -m app.ai.agent.testing.structured_demo."""
 from uuid import UUID
 
-from ..orchestrator import AgentOrchestrator
+from ..agent_loop_runner import AgentLoopRunner
 from ..outputs import ChatAnswerV1, EvidenceReference, FeedAnswerV1, FeedContentItemV1
 from ..registry import ToolName
 from ..schemas import AgentContext, ModelTurn, ToolCall
@@ -26,7 +26,7 @@ def main():
                                           arguments={"query": "synthetic sleep", "top_k": 5})]),
             ModelTurn(text=output.model_dump_json()),
         ])
-        result = AgentOrchestrator(client, fake_registry()).run_structured(
+        result = AgentLoopRunner(client, fake_registry()).run_structured(
             "[FAKE] 합성 기록과 관련 근거를 보여주세요.", context, output_model=type(output))
         print(result.model_dump_json(indent=2))
         if result.execution.status != "completed":

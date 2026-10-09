@@ -1,7 +1,13 @@
-# Agent / Orchestration (Fake 단계)
+# AgentLoopRunner (Fake 단계)
 
 사용자 입력 → LLM Tool 선택 → 입력 검증 → 순차 Handler 실행 → 출력 검증/JSON →
 Tool Result → LLM 재판단 → 추가 Tool 또는 최종 응답을 구현한다.
+
+`AgentLoopRunner`는 provider-independent LLM + Tool Calling 반복 실행기다. LLM 호출,
+Tool Call 수신, ToolExecutor 실행과 Tool Result 전달, 반복 상한/timeout/deadline 관리,
+최종 응답 반환 및 structured output 실행을 담당한다. Chat/Feed Workflow 선택, 개인화 Context 선택,
+Long-term Memory 로딩 정책, Guardrail 정책 결정, Workflow persistence 정책은 이 실행기의 책임이 아니다.
+
 이번 단계는 계약/Fake 검증이며 DB/RAG 연결, 의료 규칙, 챗봇 API 완성은 포함하지 않는다.
 
 ## 실행
@@ -43,16 +49,16 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 |---|---|
 | `schemas.py` | Context, ToolCall, ModelTurn, Message, State, Result, 오류/메타데이터 trace |
 | `outputs.py` | 최종 Chat/Feed V1, Paper Detail 보조 콘텐츠, 근거 참조 검증, 선택적 결과 wrapper |
-| `tools/contracts.py` | 6개 Tool의 입력/출력 Pydantic 모델, EvidencePackage |
+| `tools/contracts.py` | 3개 Tool의 입력/출력 Pydantic 모델, EvidencePackage |
 | `registry.py` | ToolName/ToolContract 단일 출처, JSON Schema 생성, ToolSpec/Registry, 빈 운영 Registry |
 | `executor.py` | 입력/출력 검증, Handler 실행, JSON 직렬화, 안전한 오류/메타데이터 로그 |
 | `_execution.py` | 동기 호출 대기 timeout, 요청 deadline 전파, 제한된 daemon worker |
 | `prompts.py` | PromptBuilder Protocol, 최소 정책과 DefaultPromptBuilder |
-| `orchestrator.py` | 호출 루프, 한 응답의 여러 Tool 순차 실행, 상한, 최종 결과 |
+| `agent_loop_runner.py` | 호출 루프, 한 응답의 여러 Tool 순차 실행, 상한, 최종 결과 |
 | `clients/base.py` | Provider-independent LLMClient Protocol |
 | `clients/openai_client.py` | SDK 주입, 모델 설정 주입, Chat Completions 변환/정규화 |
 | `tools/evidence_tools.py` | 미래 RAG 서비스의 EvidenceRetriever Protocol; 실행 구현 없음 |
-| `testing/fake_tools.py` | 고정 합성 fixture 기반 6개 Fake Handler/테스트 Registry |
+| `testing/fake_tools.py` | 고정 합성 fixture 기반 3개 Fake Handler/테스트 Registry |
 | `testing/fake_llm.py` | 정해진 ModelTurn 순서와 요청 snapshot을 사용하는 FakeLLMClient |
 | `testing/demo.py` | 최근 기록 → 근거 조회 → 최종 응답의 Fake 데모 |
 | `testing/structured_demo.py` | 같은 Tool Loop로 실행하는 Chat/Feed V1 오프라인 예시 |
@@ -77,23 +83,12 @@ UUID는 레포 실제 타입을 따른다. 날짜는 ISO 날짜, 시각은 datet
 |---|---|---|---|
 | `get_patient_profile`: 저장된 기본 환자 프로필 snapshot | `PatientProfileInput` → `PatientProfileOutput` | `{}` (추가 argument 금지) | `name?: str`, `dementia_stage?: str`, `diagnosis_date?: date`, `symptoms: list[str]`, `interests: list[str]` |
 | `get_recent_care_logs`: 최근 patient_care 기록 | `RecentCareLogsInput` → `RecentCareLogsOutput` | `days: strict int=14 (1..90)`, `limit: strict int=10 (1..30)` | `period: {start_at,end_at}`, `logs: list[CareLogItem]`, `total_count: strict int>=0` |
-| `get_patient_history`: 지표 시계열 | `PatientHistoryInput` → `PatientHistoryOutput` | `metric: str`, `period_days: int=90 (1..365)`, `aggregation: daily/weekly/monthly=weekly` | `metric`, `aggregation`, `data: list[{period_start: date,count: int>=0}]`, `summary: {latest_value,previous_value,change: int}` |
 | `search_evidence`: RAG 근거 | `EvidenceSearchInput` → `EvidencePackage` | `query: str (1..2000자)`, `top_k: int=5 (1..20)` | `query`, `evidence: list[EvidenceItem]` |
-| `save_ai_annotation`: 돌봄 기록 분석 저장 | `AIAnnotationInput` → `AIAnnotationOutput` | `log_id: UUID`, `categories: list[str]`, `tags: list[str]`, `summary: str`, `follow_up_recommended: bool=false`, `follow_up_topics: list[str]` | `success: bool`, `annotation_id?: UUID` (성공 시 필수) |
-| `check_safety_flags`: 합의된 규칙 검사 | `SafetyFlagsInput` → `SafetyFlagsOutput` | `observations: list[{type: str,present: bool}]` | `flagged: bool`, `level: none/test_only`, `matched_rules: list[str]` |
 
 `CareLogItem`: `logged_at: aware datetime`, `content: str | None=null`, `mood_tag: str | None=null`.
 기간의 `start_at`/`end_at`도 timezone-aware이며 `start_at <= logged_at < end_at`을 검사한다.
 `logs`는 실제 시각 기준 최신순(동일 시각 허용)이며 `total_count >= len(logs)`다.
 DB ID와 log_type은 결과에 노출하지 않고 동일한 visible data의 기록도 허용한다.
-
-시계열 `data`는 period_start 기준 오름차순이며 중복 기간을 거부한다.
-summary의 최근/이전 값은 마지막/마지막 이전 point와 일치해야 한다.
-빈 시계열은 (0,0,0), 한 point는 (latest,0,latest) 규칙을 기존 Fake와 동일하게 사용한다.
-annotation은 `success=false`일 때 ID 생략/null을 허용하고, 성공 시 ID를 요구한다.
-Executor의 바깥 success는 실행/검증 성공이며 내부 저장 success와 구분한다.
-Safety는 flagged일 때 test_only + 비어 있지 않은 고유 규칙을 요구하고,
-unflagged일 때 none + 빈 규칙을 요구한다. 임상 규칙/등급은 추가하지 않았다.
 
 `EvidenceItem`: 필수 `evidence_type: new_research/guideline`, `title: str`,
 `relevance_score: float (-1..1, 기존 코사인 점수 범위)`.
@@ -109,7 +104,6 @@ Agent의 extra 금지 및 유한 코사인 점수 범위 검증은 유지한다.
 실제 `dementia_stage/diagnosis_date/symptoms/interests`를 우선했다.
 `conditions/care_environment`는 `get_patient_profile V1` 범위에서 제외한다.
 돌봄 기록은 DB의 `logged_at`을 사용하며 `patient_care` 조건은 서버 내부 의미다.
-수면 등의 category, 장기 metric 집계, annotation은 아직 DB에 존재하는 계약이 아니다.
 
 ### get_patient_profile V1 semantics
 
@@ -300,8 +294,6 @@ Real Handler/Adapter, `top_k → k` 변환, 정책 전달 및 실연결 검증�
 `AgentContext`는 `request_id: str`, `user_id: UUID`, `patient_id: UUID`, `locale=ko-KR`를 담는
 불변 모델이다. 인증/소유권을 검증한 서버가 생성해야 한다. 이것만으로 인증을 구현한 것은 아니다.
 Tool Handler는 `(context, validated_input)`을 받는다. LLM이 patient/user ID를 입력하면 검증에서 거부한다.
-`log_id` 같은 리소스 ID는 실제 저장 Adapter가 반드시 Context의 사용자/환자 소유권을 검증해야 한다.
-Fake annotation은 고정 합성 `FAKE_LOG_ID`만 수락하며 실제 환자 권한 검증을 흉내 내지 않는다.
 Executor에는 출력 모델에 `patient_id`가 있을 때 Context와 비교하는 일반 검사가 남아 있다.
 `PatientProfileOutput V1`에는 이 필드가 없으므로 해당 검사는 profile에 적용되지 않는다.
 향후 Real Handler는 출력의 5개 필드로 projection하기 전에 조회 row의 identity와 접근 권한을
@@ -310,7 +302,7 @@ Executor에는 출력 모델에 `patient_id`가 있을 때 Context와 비교하�
 PromptBuilder를 생성자에 주입한다:
 
 ```python
-engine = AgentOrchestrator(client, registry, prompt_builder=DefaultPromptBuilder())
+engine = AgentLoopRunner(client, registry, prompt_builder=DefaultPromptBuilder())
 result = engine.run(user_input, trusted_context)
 ```
 
@@ -355,7 +347,7 @@ Python `TimeoutError`(내부 실행 timeout 포함), HTTPX `TimeoutException`, O
 기존 생성자에 선택적 keyword-only 옵션을 추가했다:
 
 ```python
-engine = AgentOrchestrator(client, registry,
+engine = AgentLoopRunner(client, registry,
     tool_timeout_seconds=30.0, request_timeout_seconds=120.0)
 ```
 
@@ -397,29 +389,24 @@ FakeLLM의 메모리 snapshot은 합성 테스트 전용이며 운영 기록으�
 
 ## Fake / 운영 구분
 
-`testing.fake_tools.fake_registry()`만 6개 Fake Tool을 등록한다.
+`testing.fake_tools.fake_registry()`만 3개 Fake Tool을 등록한다.
 Fake ToolSpec은 `test_only=True`이며 production Registry 등록 시 오류가 난다.
 `production_registry()`는 의도적으로 비어 있다. 동작하는 척하는 운영 stub은 없다.
 최근 기록 Fake는 `FIXTURE_NOW=2026-10-06T12:00:00Z` 기준 rolling window/최신순/limit을 사용하고,
 `total_count`는 limit 적용 전 개수다. 동일 시각 hidden UUID tie-break와 nullable fixture도 결정적이다.
-실제 권한 검증/DB 조회는 하지 않는다. 장기 history Fake의 기준 날짜는 기존 2026-10-06을 유지한다.
-Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 저장은 하지 않는다.
-안전 검사는 `TEST_ONLY_SENTINEL`만 사용하고, 실제 `sudden_confusion` 등 임상 규칙을 생성하지 않는다.
-`level=test_only`는 의료 중증도가 아니다. 모든 근거 ID/DOI/PMID는 명백한 FAKE fixture다.
+실제 권한 검증/DB 조회는 하지 않는다.
+모든 근거 ID/DOI/PMID는 명백한 FAKE fixture다.
 
 ## 다음 실제 연결 단계: 팀 합의 필요
 
 현재 DB 함수는 논문 수집/조회/분석/임베딩 관련 함수뿐이다.
-6개 Tool 중 **현재 계약만으로 바로 운영 연결 가능한 Tool은 없다**. 실제 연결은 다음 작업이다.
+3개 Tool 중 **현재 계약만으로 바로 운영 연결 가능한 Tool은 없다**. 실제 연결은 다음 작업이다.
 
 | Tool | 필요한 backing 계약/합의 |
 |---|---|
 | 프로필 | Context의 사용자/환자 소유권과 row identity를 검증하는 조회 함수; sparse success와 profile not-found/failure 구분 후 V1 5개 필드로 변환 |
 | 최근 기록 | V1은 trusted user/patient, patient_care only, rolling datetime window로 확정; 실제 Backend DTO/DB 조회 함수, authorization 적용, count/list snapshot 일관성, production Handler는 후속 |
-| 장기 변화 | metric 추출의 구조화 데이터 출처, aggregation/기간/빈 값 정의, 결정적 집계 함수 |
 | 근거 검색 | `EvidenceRetriever.search_evidence(query, top_k, context) -> EvidencePackage`; query embedding과 검색은 RAG 담당 |
-| 분석 저장 | Context 소유권 검증, annotation 저장 위치/모델, idempotency/재실행, 저장 정책 |
-| 안전 검사 | 담당자가 승인한 규칙 세트/버전, 실제 level enum/의료적 의미 |
 
 기존 `search_similar(embedding, top_k, model_name)`는 UUID+score만 반환하고,
 `get_papers_by_ids(paper_ids)`는 논문 상세를 반환한다. 현재 `app.ai.retrieval.search.search`
@@ -427,7 +414,8 @@ Fake annotation UUID는 Context 환자 ID와 입력으로 결정하며 실제 �
 다음 Adapter에서 `top_k` → `k`, Context 전달 정책과 Agent EvidencePackage 변환을 처리한다.
 내부 누락 ID는 `paper_id`로 매칭해야 하며 리스트 위치만으로 점수를 결합하면 안 된다.
 RAG의 `evidence_type="new_research"` 고정과 full_text_available 기본 false는 이번에 변경하지 않았다.
-`save_summary(AnalysisIn)`는 논문 분석 저장이므로 돌봄 기록 annotation 저장에 재사용하지 않는다.
+care annotation persistence는 향후 `CareAnnotationWorkflow`가 structured output 검증/guardrail 후
+deterministic하게 수행할 책임이다. 해당 Workflow와 DB persistence는 아직 구현하지 않았다.
 실제 RAG와 DB 계약/공용 스키마를 이번 작업에서 수정하거나 새로 가정하지 않았다.
 
 ## 최종 답변 Structured Output V1 (선택적)
@@ -494,7 +482,7 @@ Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 �
 
 ### 출처 참조 검증과 서버 조립 경계
 
-Orchestrator는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
+AgentLoopRunner는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
 요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 Tool Result payload는 바꾸지 않는다.
 모델은 role=tool message의 tool_call_id와 data.evidence 위치를 참조한다.
 `resolve_evidence_references(output, evidence_by_call)`는 output을 다시 검증하고,
@@ -555,6 +543,6 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s . -t . -v
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.ai.agent.testing.demo
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.ai.agent.testing.structured_demo
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c 'import app.ai.agent.orchestrator; import app.ai.agent.outputs; import app.ai.retrieval.search; import app.ai.retrieval.evidence'
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c 'import app.ai.agent.agent_loop_runner; import app.ai.agent.outputs; import app.ai.retrieval.search; import app.ai.retrieval.evidence'
 git diff --check
 ```
