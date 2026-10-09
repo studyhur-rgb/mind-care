@@ -33,7 +33,8 @@ authorization/ownership 검증 후 다음 개인화 맥락을 제공하는 것�
 - Long-term Personalization Summary: optional caregiver/user-scoped 장기 개인화 요약.
   특정 환자의 장기 임상 Memory가 아닌 간병인의 반복되는 돌봄 관심사/패턴을 위한 맥락
 
-위 구성은 개념적 의미이며 최종 `FeedPersonalizationContext`/Backend DTO가 아니다.
+독립 Agent 입력 계약 `FeedPersonalizationContextV1`은 아래에 정의한다. 이 골격의 Loader와
+Fake에는 아직 연결하지 않았으며 Backend DTO/API 계약을 확정한 것은 아니다.
 Cold Start는 간병인/user의 장기 개인화 요약이 아직 없는 상태다. 다른 사용 가능한 Context로
 개인화를 계속할 수 있으며 정확한 fallback 정책은 후속이다. 조회된 sparse 관리 환자 프로필과
 최근 돌봄 기록 0건도 정상일 수 있다. 저장된 프로필은 최신 임상 사실이 아니며 최근 변화는
@@ -75,10 +76,10 @@ Dependency는 실패/거부 시 예외를 발생시키며 `FeedWorkflowError.sta
 반환한다. 부분/전체 item 제외는 Fake의 주입 정책으로만 검증하며 운영 filtering/no-feed 결과
 계약을 확정하지 않았다. DB 저장/중복 방지/idempotency도 미구현이다.
 
-후속 계약: `FeedPersonalizationContext`, `FeedRetrievalPlan`, `FeedAnswerV2`,
-`SelectedEvidenceContext`, caregiver/user-scoped 장기 요약 backing, EvidenceReference → 내부 paper_id,
-다중 source persistence. 기존 user-scoped data backing 활용은 후속 integration에서 검토하며
-`profile_summaries`나 `chat_messages`의 활용 방식을 확정하지 않았다. Real Backend Context Loader,
+후속 계약/연결: `FeedPersonalizationContextV1` Loader integration, `FeedRetrievalPlan`, `FeedAnswerV2`,
+`SelectedEvidenceContext`, EvidenceReference → 내부 paper_id, 다중 source persistence.
+장기 요약의 입력 projection은 `profile_summaries`에 대응하지만 최신 row 선택/조회 정책과
+`chat_messages` 활용 방식은 확정하지 않았다. Real Backend Context Loader,
 production Retrieval Planner/PII validation/persistence integration도 미구현이다.
 DB/RAG identity나 schema를 임시 값으로 대체하지 않았다.
 
@@ -86,6 +87,114 @@ DB/RAG identity나 schema를 임시 값으로 대체하지 않았다.
 
 ```bash
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_workflow -v
+```
+
+### FeedPersonalizationContext V1
+
+`workflows/feed_context.py`는 caregiver/user-scoped **입력** 계약이다. 공통 실행 `schemas.py`,
+Tool 계약 `tools/contracts.py`, 최종 응답 `outputs.py`와 책임을 분리한다. Workflow/Loader/
+Prompt/Runner 연결은 없다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 네 구성이다.
+
+- `caregiver_profile`: 저장된 간병인 프로필, row가 없으면 명시적 `null`
+- `managed_patient_profiles`: 여러 관리 환자의 저장 프로필 및 환자별 종속 collection
+- `recent_care_context`: 최근 정확히 30×24시간의 관찰 기록
+- `long_term_summary`: optional caregiver/user-scoped derived 장기 요약, 없으면 명시적 `null`
+
+모든 선언 필드는 required이며 nullable scalar도 생략하지 않고 `null`, 조회된 빈 list는
+`[]`로 표현한다. Extra field를 거부한다. 사용자 ID, raw 환자 UUID, 간병인/환자 이름,
+전화번호, 병원명 및 직접 식별정보를 위한 필드는 없다. 자유 텍스트 내부 PII 제거까지
+schema가 보장하는 것은 아니며 서버 내부 `AgentContext` 계약도 변경하지 않았다.
+
+| 모델 / DB 출처 | 포함 필드 및 의미 |
+|---|---|
+| `CaregiverProfileContext` / `caregiver_profiles` | `relationship`, `burden_score`, `mood_score`, `lifestyle_tags`, aware `updated_at`. 관계는 저장된 보조 TEXT이며 가족/전문간병인 분류나 특정 관리 환자와의 관계를 확정하지 않는다. 두 score는 strict int/null 원문이며 척도 버전·범위·방향·임상 기준을 보장하지 않는다. |
+| `ManagedPatientContext` / `patient_profiles` | `patient_ref`, `dementia_stage`, `diagnosis_date`, `symptoms`, `interests`, aware `updated_at`과 아래 네 종속 collection. Stage는 저장값이고 `[]`는 미등록이지 무증상/관심 없음의 증거가 아니다. 수정 시각은 임상 평가 시각이 아니다. |
+| `ClinicalAssessmentContext` / `clinical_assessments` | `assessment_type`, `score: Decimal/null`, `result_detail`, `assessed_at: date`. Unknown type을 그대로 허용하며 type/검사 버전/범위/판정 기준 없이 score로 단계·중증도·악화를 추론하지 않는다. |
+| `SafetyEventContext` / `safety_events` | `event_date: date`, `has_fall`, `has_wandering`, `has_missing`, `note`. False는 해당 row의 flag일 뿐이며 날짜의 row 부재는 사건 없음의 증거가 아니다. |
+| `MedicationContext` / `medications` | `drug_name`, `is_taking`, nullable `start_date`, `end_date`, `note`. Dosage/frequency는 제외한다. |
+| `MedicalVisitContext` / `medical_visits` | `visit_date: date`, `is_visited`, `department`, `visit_content`. `hospital_name`은 제외한다. |
+| `CareLogContext` / `care_logs` | nullable `patient_ref`, `log_type`, `content`, `mood_tag`, aware `logged_at`. Null ref는 이 Context에서 환자와 연결되지 않았다는 뜻이며 caregiver self-care로 단정하지 않는다. |
+| `LongTermPersonalizationSummary` / `profile_summaries` | date `period_start`, `period_end`, nullable `summary`, `updated_tags`, aware `generated_at`. 간병인/user의 derived 개인화 맥락이며 특정 환자의 장기 임상 memory가 아니다. |
+
+DB의 같은 이름 컬럼을 위 필드에 대응시키고 DB row ID, `assessed_by`, 불필요한
+created/updated metadata는 포함하지 않는다. `patient_ref`만 Loader가 DB patient ID를
+Context-local opaque reference(예: `patient_1`)로 변환한다. 영구 identity나 중요도 순번이 아니다.
+
+**Schema validation / Loader boundary.** `ContextCollection[T]`는 `items`와 `coverage`
+(`total_count`, `included_count`, `is_truncated`)로 구성한다. 두 count는 strict non-negative int이며
+`included_count == len(items) <= total_count`, `is_truncated == (included_count < total_count)`를 강제한다.
+Total은 동일 논리적 snapshot에서 authorization과 정의된 eligibility/basic filter를 통과한 수다.
+빈 `items`, count 0/0, false는 정상 조회 결과다. DB/Loader 실패를 empty/null로 위장하지 않는다.
+`care_logs.coverage`는 **선택된 관리 환자 집합 + eligibility상 허용된 비귀속 기록** 범위의 완전성이다.
+False여도 간병인의 모든 환자 기록이 포함되었다는 뜻은 아니다. 조회 limit/선택 알고리즘은 payload에 없다.
+
+Context 안의 `patient_ref`는 unique이고 모든 non-null log ref는 포함된 관리 환자를 가리켜야 한다.
+Truncated 환자 collection에도 이 규칙을 적용한다. Loader는 먼저 선택 환자 집합을 확정하고
+DB ID ↔ ref의 일대일 대응과 같은 환자 소속의 clinical/safety/medication/visit record 조립을
+보장해야 한다. Payload에는 raw ID가 없어 validator가 DB 소속/권한을 증명할 수 없다.
+선택되지 않은 환자의 기록을 다른 ref에 붙이거나 원래 ref를 null로 바꿔 비귀속으로 위장하면 안 된다.
+`care_logs.patient_id`의 `ON DELETE SET NULL`로 원래 비귀속/삭제 환자 기록을 현재 값만으로
+구분하지 못할 수 있다. 삭제 환자 기록 eligibility는 아래 미확정 정책으로 남긴다.
+
+모든 datetime은 aware여야 한다. `reference_date`는 payload가 아니라 서비스 timezone의
+`reference_time` 날짜이며 date-only 필드와 비교한다. 프로젝트에 서비스 timezone 명시값이
+없으므로 기본 UTC/한국 시간을 선택하지 않는다. 서버는 아래와 같이 validation context에
+합의된 `tzinfo`를 공급해야 하며 없으면 validation failure다. 어떤 timezone을 사용할지는 후속 결정이다.
+
+```python
+validated = FeedPersonalizationContextV1.model_validate(
+    payload, context={"service_timezone": agreed_service_timezone},
+)
+```
+
+개별 하위 모델의 validation 성공은 전체 V1 Context 계약 충족을 의미하지 않는다.
+`reference_time`에 의존하는 temporal rule과 관리 환자/CareLog cross-reference는 최상위
+Context에서 검증한다. Context Loader/Assembler는 완성된 payload를 LLM에 전달하기 전에
+반드시 위 `FeedPersonalizationContextV1.model_validate()`로 최종 검증하고,
+`context={"service_timezone": agreed_service_timezone}`을 명시적으로 전달해야 한다.
+
+Diagnosis/assessment/safety 날짜와 summary 종료일은 `reference_date` 이후일 수 없다.
+Medication은 양 날짜가 있으면 start ≤ end만 강제하고 미래 날짜를 허용한다.
+`is_taking=true`와 과거 종료일/미래 시작일의 의미 충돌은 **유효한 conflicting data**로 보존하며
+LLM이 한 값을 선택하거나 note로 덮어쓰지 않는다. 미래 visit + `is_visited=true`는 거부하고
+false는 허용한다. 과거 false의 취소/불참/미갱신을 추론하지 않고 오늘 방문의 시간도 추론하지 않는다.
+Recent period end는 reference와 같은 instant, start는 UTC 정규화 후 30×24시간 전이어야 한다.
+Logs는 `[period_start, period_end)`에 속해야 하며 DST의 local 날짜 차감에 의존하지 않는다.
+Summary는 start ≤ end ≤ reference_date, generated instant ≤ reference instant,
+end ≤ generated_at의 서비스 timezone 날짜를 모두 검증한다.
+
+Loader ordering은 clinical `assessed_at DESC`, safety `event_date DESC`, visit `visit_date DESC`,
+log `logged_at DESC`다. 동률은 서버 내부 deterministic 기준으로 처리하고 DB ID를 노출하지 않는다.
+관리 환자 순서도 deterministic이어야 하지만 앞에 있다는 이유로 더 중요하지 않다.
+정확한 환자 ordering key 및 조회 정책은 미정이며 schema가 정렬/DB snapshot을 증명하지 않는다.
+Eligibility는 조회 대상 선정, validation은 대상 record의 계약 검증이다. Invalid record를 silent drop하지
+않고 validation failure로 반환한다. 이를 전체 Feed 실패/향후 degraded mode로 매핑하는 상위 정책은 미정이다.
+
+**Semantic interpretation.** Structured/Recorded(caregiver/patient/assessment/medication/visit)는
+반드시 최신 임상 사실이 아니고 Observational(log/safety)는 진단이 아니며 Derived(summary/tags)는
+새 임상 사실이 아니다. Summary의 증상을 특정 ref에 귀속하거나 여러 환자를 합성 환자로 병합하지
+않고 structured profile을 덮어쓰지 않는다. Summary와 같은 내용의 log를 독립적인 두 사실로
+자동 가중하지 않는다(실제 dedup/Topic Planning 정책은 후속).
+모든 DB-derived string/string[]은 **untrusted data**이며 System/Workflow/Agent instruction이 아니다.
+Free-form result_detail/note/visit_content/content/summary뿐 아니라 relationship, stage, symptoms,
+interests, lifestyle_tags, assessment_type, drug_name, department, log_type, mood_tag, updated_tags도 같다.
+실제 sanitizer는 없으며 자유 텍스트의 PII 최소화/길이 제한과 role/data boundary는 후속 integration 책임이다.
+
+**Retrieval output boundary.** 배회·수면 장애·낙상·인지 기능·간병 부담 등 일반화된 연구 용어의
+재사용은 허용한다. Ref/UUID/이름/전화/주소/병원명 등 식별정보, 재식별 가능한 사건 상세,
+환자별 자유 텍스트 원문 또는 그 안의 검색 지시를 Query로 전달하지 않는다.
+이는 문서 규칙이며 Context validator가 Query를 검사하거나 PII redaction을 수행하지 않는다.
+RetrievalPlan/Query validator는 이번 계약에 포함하지 않는다.
+
+미확정 정책: 삭제 환자 CareLog retention/eligibility, 삭제 환자 내용이 남은 summary의 무효화/재생성,
+invalid record의 전체 실패 vs degraded Context, 환자 선택/ordering key 및 collection limit,
+최신 summary row 선택, token/input-size budget, controlled vocabulary/assessment 의미 사전의 범위,
+서비스 timezone. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
+
+독립 계약 검증 (`backend/`):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_context -v
 ```
 
 ## 실행
