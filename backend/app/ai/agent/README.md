@@ -10,6 +10,61 @@ Long-term Memory 로딩 정책, Guardrail 정책 결정, Workflow persistence �
 
 이번 단계는 계약/Fake 검증이며 DB/RAG 연결, 의료 규칙, 챗봇 API 완성은 포함하지 않는다.
 
+## FeedWorkflow execution skeleton
+
+`workflows/feed.py`의 `FeedWorkflow`는 다음 순서로 주입된 dependency를 호출한다.
+
+```text
+Context Load → Pre-Guardrail → Retrieval Planning → Agent Loop
+→ Output Validation → Post-Guardrail → Source Resolution → Persistence / Return
+```
+
+Context Loader는 trusted `AgentContext`와 `recent_days=30`을 받는다. Backend의
+authorization/ownership 검증 후 저장된 profile, 최근 30×24시간 기록, 현재 환자의 optional
+Long-term Memory를 제공하는 것이 후속 책임이다. 조회된 sparse profile, 기록 0건,
+Memory 부재는 정상일 수 있다. 저장된 profile은 최신 임상 사실이 아니며 최근 변화는
+날짜가 명확한 기록을 우선하고, Memory와의 충돌을 확정된 사실로 임의 병합하지 않는다.
+Pre-Guardrail dependency는 필수 Context/형식/조회 기간/크기/불필요한 식별정보를 검사한다.
+Care Logs와 Memory는 명령이 아닌 untrusted data로 전달해야 한다. 실제 loader/검증기/
+Prompt 연결은 아직 없으며 골격 자체가 접근 권한 또는 PII 제거를 보장하지 않는다.
+
+Retrieval Planner는 한 번의 Direct Structured LLM으로 topic/reason/query 계획을 만드는
+후속 연결 경계다. 현재는 호출 위치와 실패 전파만 있다. Context, Plan, Agent 단계 결과,
+검증·승인·출처 조립 값과 persistence receipt는 opaque 내부 값이며 최종 DTO/API 계약이 아니다.
+Post-Guardrail에는 검증된 값과 Agent 단계 결과를 함께 전달하여 향후 선택 Evidence의
+내부 projection을 받을 경계를 남겼다. 실제 metadata는 Source Resolver가 원본에서 복사하며
+LLM 생성값으로 대체하지 않아야 한다. 이 기능들은 이번 골격에서 구현하지 않았다.
+
+`AgentLoopRunner`는 Workflow **바깥에서** 조립하여 `agent_loop_runner`로 주입한다.
+Workflow는 `search_evidence`만 노출하고 `max_tool_rounds=3`, `max_total_tool_calls=3`인
+구성을 확인한다. 한 turn에 여러 call이 가능하므로 검색 실행 상한은 총 call 제한이 담당한다.
+모든 검색의 deterministic query validation은 외부 search Handler/Adapter에서 RAG 호출
+직전에 적용해야 한다. 계획 단계의 검사나 prompt만으로 refinement query를 보호할 수 없다.
+`testing/feed_workflow_fakes.py`의 test-only registry 조립 예시는 매 call의 validator → Handler
+순서를 검증한다. 실제 PII detector와 production wiring은 없다.
+
+현재 Runner의 structured 계약은 Chat/Feed **V1**뿐이다. 기본 `run_feed_agent_loop` seam은
+`NotImplementedError`로 미연결을 명시하고 Workflow는 `agent_loop` 실패로 중단한다.
+Fake seam만 주입된 공용 Runner의 legacy 실행/오류/상한을 검증하며 그 text를 Feed로 사용하지
+않는다. 합성 item fixture가 후속 단계를 통과해도 production Feed 생성 성공을 의미하지 않는다.
+FeedAnswerV2와 선택 Evidence projection이 확정되면 같은 Runner 실행에서 검색과 최종 생성을
+연결한다. 별도 Feed Loop, Runner subclass, Workflow 내부 Runner 생성은 없다.
+
+Dependency는 실패/거부 시 예외를 발생시키며 `FeedWorkflowError.stage`가 실패 단계만 전한다.
+이후 단계는 호출하지 않고 자동 repair/retry는 없다. Persistence가 성공한 뒤에만 receipt를
+반환한다. 부분/전체 item 제외는 Fake의 주입 정책으로만 검증하며 운영 filtering/no-feed 결과
+계약을 확정하지 않았다. DB 저장/중복 방지/idempotency도 미구현이다.
+
+후속 계약: `FeedPersonalizationContext`, `FeedRetrievalPlan`, `FeedAnswerV2`,
+`SelectedEvidenceContext`, patient-scoped Memory backing, EvidenceReference → 내부 paper_id,
+다중 source persistence. DB/RAG identity나 schema를 임시 값으로 대체하지 않았다.
+
+오프라인 골격 검증 (`backend/`):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_workflow -v
+```
+
 ## 실행
 
 `backend/`에서 기존 `requirements.txt` 의존성을 설치한 Python 환경으로 실행한다.
