@@ -117,14 +117,49 @@ class FeedContextSourceSnapshot(FeedSourceModel):
 
 class FeedContextSource(Protocol):
     def load_snapshot(self, *, user_id: UUID, reference_time: datetime,
+                      reference_date: date,
                       recent_period_start: datetime,
                       recent_period_end: datetime) -> FeedContextSourceSnapshot:
-        """Return authorized/eligible user data with stable ordering and counts.
+        """Return a complete successful Feed read, not a partial/demo aggregate.
 
-        Use exactly the supplied reference/window for time-based selection;
-        never create a separate now()/today(). CareLogs use [start, end).
-        Clinical/safety/visit/log ordering follows the existing Context README;
-        medication ordering and DB tie-breaks remain Production Source policy.
-        No service timezone/local-date selection contract is supplied here.
+        reference_time is the Loader's UTC-normalized instant; reference_date
+        is that same instant's service-timezone calendar date. reference_date
+        is server-only selection metadata, not a new Snapshot/Context field.
+        The supplied CareLog window is [recent_period_start, recent_period_end).
+        Use them for time-based eligibility; never generate datetime.now() or
+        date.today(), or recompute eligibility against an independent clock.
+
+        Backend/Source owns user existence, trusted-scope authorization and
+        explicit Feed Read eligibility. Backend/DB must complete every required
+        read and pre-limit count in one consistent logical snapshot. That means
+        reads/counts observe the same DB state, not historical as-of recovery of
+        mutable profiles. Sequential helpers or merely sharing a transaction
+        do not establish snapshot consistency; isolation is Backend/DB-owned.
+
+        Only after successful reads can None/empty/zero mean eligible data is
+        absent. Missing users, denied access, unimplemented paths, query/count/
+        snapshot/temporal-selection failures and partial reads must fail the
+        call, never become an empty Snapshot or total_count=len(items) fallback.
+        Returned invalid records must fail validation, not be silently dropped.
+
+        Stable ordering baseline (created_at/id are server-only tie-breaks):
+        assessment: assessed_at DESC, created_at DESC, id;
+        safety: event_date DESC (one row per patient/date);
+        medication: is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id;
+        visit: visit_date DESC, created_at DESC, id;
+        CareLog: logged_at DESC plus a future Feed Read deterministic tie-break.
+        Ordering is not eligibility; current-only medications/latest-only
+        assessments/event-only safety are not the final Feed selection policy.
+        Loader preserves child/log order and canonicalizes patients by UUID.bytes.
+
+        UserProfileContext/PatientContext/get_user_profile_context() are
+        current-state/demo aggregates, not FeedContextSourceSnapshot,
+        SourceManagedPatient or FeedPersonalizationContextV1. They select latest
+        assessments, current medication and some safety/visits, omit CareLogs/
+        Summary and use their own clock. A future Production Source must use an
+        internal Backend Feed Read Contract and explicit DTO field projection,
+        not those aggregates or /feed HTTP APIs. CareLog/Summary reads, pre-limit
+        counts, snapshot consistency and read success/failure implementation
+        remain integration blockers; no Production Source is implemented here.
         """
         ...

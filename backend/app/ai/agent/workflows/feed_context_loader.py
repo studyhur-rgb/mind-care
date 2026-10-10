@@ -1,4 +1,4 @@
-"""Context Loader Policy V1: assembly only, with no production DB wiring."""
+"""Context Loader Policy V1.1: assembly only, with no production DB wiring."""
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Callable, Literal, TypeVar
 from uuid import UUID
@@ -165,8 +165,16 @@ class DefaultFeedContextLoader:
         except Exception:
             raise FeedContextLoadError("invalid_clock") from None
         try:
+            # Keep service-timezone failures in the existing Context error category.
+            if not isinstance(self.service_timezone, tzinfo):
+                raise ValueError("Service timezone must be supplied")
+            reference_date = reference.astimezone(self.service_timezone).date()
+        except Exception:
+            raise FeedContextLoadError("context_validation_failed") from None
+        try:
             raw_snapshot = self.source.load_snapshot(
                 user_id=context.user_id, reference_time=reference,
+                reference_date=reference_date,
                 recent_period_start=start, recent_period_end=reference,
             )
         except Exception:

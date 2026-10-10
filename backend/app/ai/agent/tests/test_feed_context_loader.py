@@ -1,6 +1,6 @@
 """Offline AI-side Loader tests; no DB authorization/snapshot claim."""
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import inspect
 import traceback
@@ -99,8 +99,10 @@ class FakeFeedContextSource:
         self.error = error
         self.calls = []
 
-    def load_snapshot(self, *, user_id, reference_time, recent_period_start, recent_period_end):
+    def load_snapshot(self, *, user_id, reference_time, reference_date,
+                      recent_period_start, recent_period_end):
         self.calls.append({"user_id": user_id, "reference_time": reference_time,
+                           "reference_date": reference_date,
                            "recent_period_start": recent_period_start, "recent_period_end": recent_period_end})
         if self.error is not None:
             raise self.error
@@ -234,12 +236,81 @@ class FeedContextLoaderTests(unittest.TestCase):
         self.assertEqual(len(source.calls), 1)
         call = source.calls[0]
         self.assertEqual(call, {"user_id": USER, "reference_time": NOW,
+                                "reference_date": TODAY,
                                 "recent_period_start": NOW - timedelta(hours=720), "recent_period_end": NOW})
         self.assertIs(call["reference_time"], call["recent_period_end"])
         self.assertIs(call["reference_time"].tzinfo, timezone.utc)
         self.assertEqual(result.reference_time, call["reference_time"])
         self.assertEqual(result.recent_care_context.period_start, call["recent_period_start"])
         self.assertEqual(result.recent_care_context.period_end, call["recent_period_end"])
+
+    def test_kst_date_boundary_uses_one_clock_for_all_source_times(self):
+        instant = datetime(2026, 10, 9, 16, tzinfo=timezone.utc)
+        kst = timezone(timedelta(hours=9), "KST")
+        # A second clock call would supply a different day and must not occur.
+        clock = Mock(side_effect=[instant, instant + timedelta(days=1)])
+        loader, source, _ = self.make_loader(clock=clock, service_timezone=kst)
+        result = loader(CONTEXT, recent_days=30)
+        clock.assert_called_once_with()
+        self.assertEqual(source.calls, [{
+            "user_id": USER, "reference_time": instant, "reference_date": date(2026, 10, 10),
+            "recent_period_start": datetime(2026, 9, 9, 16, tzinfo=timezone.utc),
+            "recent_period_end": instant,
+        }])
+        self.assertEqual(result.reference_time, instant)
+        self.assertEqual(result.recent_care_context.period_start, source.calls[0]["recent_period_start"])
+        self.assertEqual(result.recent_care_context.period_end, instant)
+
+    def test_reference_date_remains_source_only_metadata(self):
+        loader, source, _ = self.make_loader(full_snapshot())
+        result = loader(CONTEXT, recent_days=30)
+        self.assertEqual(source.calls[0]["reference_date"], TODAY)
+        self.assertNotIn("reference_date", result.model_dump(mode="json"))
+        self.assertNotIn('"reference_date"', result.model_dump_json())
+        for model in (FeedPersonalizationContextV1, s.FeedContextSourceSnapshot):
+            with self.subTest(model=model.__name__):
+                self.assertNotIn("reference_date", model.model_fields)
+                self.assertNotIn("reference_date", model.model_json_schema()["properties"])
+
+    def test_source_reference_date_is_required_keyword_only(self):
+        parameter = inspect.signature(s.FeedContextSource.load_snapshot).parameters["reference_date"]
+        self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(parameter.default, inspect.Parameter.empty)
+        self.assertIs(parameter.annotation, date)
+
+    def test_invalid_service_timezone_keeps_context_validation_error(self):
+        for service_tz in (None, "Asia/Seoul", BrokenOffset()):
+            loader, source, clock = self.make_loader(service_timezone=service_tz)
+            with self.subTest(timezone_type=type(service_tz).__name__), patch("logging.Logger.handle") as log:
+                error = self.assert_load_error(loader, "context_validation_failed")
+                clock.assert_called_once_with()
+                self.assertEqual(source.calls, [])  # Cannot provide a valid Source reference_date.
+                log.assert_not_called()
+                self.assertNotIn(PRIVATE, "".join(traceback.format_exception(error)))
+
+    def test_dst_transition_dates_and_bounds_share_the_clock_instant(self):
+        tz = ZoneInfo("America/New_York")
+        for instant in (
+            datetime(2026, 3, 8, 4, 30, tzinfo=timezone.utc),
+            datetime(2026, 3, 8, 6, 30, tzinfo=timezone.utc),
+            datetime(2026, 3, 8, 7, 30, tzinfo=timezone.utc),
+            datetime(2026, 11, 1, 3, 30, tzinfo=timezone.utc),
+            datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc),
+            datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc),
+        ):
+            local = instant.astimezone(tz)
+            clock = Mock(return_value=local)
+            loader, source, _ = self.make_loader(clock=clock, service_timezone=tz)
+            with self.subTest(instant=instant, fold=local.fold):
+                result = loader(CONTEXT, recent_days=30)
+                clock.assert_called_once_with()
+                self.assertEqual(source.calls, [{
+                    "user_id": USER, "reference_time": instant, "reference_date": local.date(),
+                    "recent_period_start": instant - timedelta(hours=720), "recent_period_end": instant,
+                }])
+                self.assertIs(source.calls[0]["reference_time"].tzinfo, timezone.utc)
+                self.assertEqual(result.recent_care_context.period_end - result.recent_care_context.period_start,
+                                 timedelta(hours=720))
 
     def test_invalid_clock_values_do_not_reach_source(self):
         for value in (None, "not datetime", TODAY, 42, NOW.replace(tzinfo=None),
@@ -268,6 +339,8 @@ class FeedContextLoaderTests(unittest.TestCase):
                 self.assertEqual(period.period_end, value.astimezone(timezone.utc))
                 self.assertNotEqual(period.period_start, (value - timedelta(days=30)).astimezone(timezone.utc))
                 self.assertEqual(source.calls[0]["recent_period_start"], period.period_start)
+                self.assertEqual(source.calls[0]["reference_date"], value.date())
+                self.assertEqual(len(source.calls), 1)
                 clock.assert_called_once_with()
 
     def test_caregiver_user_scope_mismatch(self):

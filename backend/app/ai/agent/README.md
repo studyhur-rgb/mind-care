@@ -137,9 +137,11 @@ DB ID ↔ ref의 일대일 대응과 같은 환자 소속의 clinical/safety/med
 구분하지 못할 수 있다. 삭제 환자 기록 eligibility는 아래 미확정 정책으로 남긴다.
 
 모든 datetime은 aware여야 한다. `reference_date`는 payload가 아니라 서비스 timezone의
-`reference_time` 날짜이며 date-only 필드와 비교한다. 프로젝트에 서비스 timezone 명시값이
-없으므로 기본 UTC/한국 시간을 선택하지 않는다. 서버는 아래와 같이 validation context에
-합의된 `tzinfo`를 공급해야 하며 없으면 validation failure다. 어떤 timezone을 사용할지는 후속 결정이다.
+`reference_time` 날짜이며 date-only 필드와 비교한다. Loader/Context 계약은 generic `tzinfo` DI를
+유지하고 기본 UTC/한국 시간을 선택하지 않는다. 현재 Production composition은 Backend의
+canonical `app.user_schemas.APP_TIMEZONE`(KST)과 동일한 timezone을 binding해야 한다.
+Backend 기준이 바뀌면 composition도 함께 바꾼다. 서버는 아래처럼 validation context에
+`tzinfo`를 공급해야 하며 없으면 validation failure다. 실제 Production wiring은 아직 없다.
 
 ```python
 validated = FeedPersonalizationContextV1.model_validate(
@@ -163,8 +165,9 @@ Logs는 `[period_start, period_end)`에 속해야 하며 DST의 local 날짜 차
 Summary는 start ≤ end ≤ reference_date, generated instant ≤ reference instant,
 end ≤ generated_at의 서비스 timezone 날짜를 모두 검증한다.
 
-Loader ordering은 clinical `assessed_at DESC`, safety `event_date DESC`, visit `visit_date DESC`,
-log `logged_at DESC`다. 동률은 서버 내부 deterministic 기준으로 처리하고 DB ID를 노출하지 않는다.
+Source ordering은 clinical `assessed_at DESC`, safety `event_date DESC`, visit `visit_date DESC`,
+log `logged_at DESC`를 기본으로 하며 상세 tie-break와 medication 순서는 아래 V1.1 표를 따른다.
+동률은 서버 내부 deterministic 기준으로 처리하고 DB ID를 노출하지 않는다.
 관리 환자 순서도 deterministic이어야 하지만 앞에 있다는 이유로 더 중요하지 않다.
 Schema는 정렬/DB snapshot을 증명하지 않는다. 아래 V1 Loader는 환자 배열의 canonical UUID byte
 순서를 사용하며 실제 DB 조회 ordering/tie-break는 Production Source 책임이다.
@@ -190,8 +193,10 @@ RetrievalPlan/Query validator는 이번 계약에 포함하지 않는다.
 
 미확정 정책: 삭제 환자 CareLog retention/eligibility, 삭제 환자 내용이 남은 summary의 무효화/재생성,
 향후 degraded Context 정책 및 patient selection/limit, child collection limit,
-최신 summary row 선택, token/input-size budget, controlled vocabulary/assessment 의미 사전의 범위,
-서비스 timezone. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
+최신 summary row 선택, token/input-size budget, free-text privacy/redaction, Production APM privacy,
+005 structured visit detail의 future Context 포함 범위와 Planner/Prompt의 assessment metadata 활용.
+Backend canonical assessment metadata, 현재 Production timezone binding 및 medication ordering은
+아래 V1.1에서 확정한다. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
 
 독립 계약 검증 (`backend/`):
 
@@ -199,7 +204,11 @@ RetrievalPlan/Query validator는 이번 계약에 포함하지 않는다.
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_context -v
 ```
 
-### Context Loader Policy V1 — AI-side implementation
+### Context Loader Policy V1.1 — AI-side implementation
+
+V1.1은 기존 V1의 필드/validator/`schema_version="1"`을 그대로 유지하며 Source 시간 입력과
+Backend integration 정책을 구체화한다. Feed는 계속 caregiver/user scoped이며
+trusted `AgentContext.user_id`에서 시작한다. `AgentContext.patient_id`는 scope 선정에 사용하지 않는다.
 
 `workflows/feed_context_source.py`는 Source ↔ Loader 사이 **server-only AI 내부 DTO/Protocol**이다.
 공용 `app.schemas`/DB 계약이나 LLM Context가 아니다. Caregiver/summary의 `user_id`, managed
@@ -213,12 +222,17 @@ patient의 `patient_id`/`caregiver_id`, 각 child의 `patient_id`, CareLog의 `u
 `__call__(context, recent_days=30)`만 허용하며 다른 값은 Source/clock 호출 전에 `invalid_request`다.
 Clock을 한 번 호출해 datetime/aware/유효한 offset을 확인한 **후** UTC로 정규화한다.
 Reference와 period end는 같은 instant이고 start는 `reference - timedelta(hours=720)`이다.
-Service timezone은 window 계산이 아닌 기존 date-only validation에 사용하며 기본값은 없다.
+Service timezone은 window 계산이 아닌 Source selection용 `reference_date` 계산과 기존
+date-only validation에 사용하며 기본값은 없다. Loader 내부에 KST를 하드코딩하지 않는다.
 
-`FeedContextSource.load_snapshot(*, user_id, reference_time, recent_period_start, recent_period_end)`를
-한 번 호출한다. Source는 전달된 기준시각/window로 조회·시간 기반 selection을 수행하고 별도
-now()/today()를 만들지 않는다. 현재 signature에는 service timezone/reference_date가 없다.
-Local-date selection이 필요하면 후속 명시적 계약으로 확장하며 임의 timezone을 선택하지 않는다.
+`reference_date = reference.astimezone(service_timezone).date()`를 같은 clock instant에서 계산한 뒤
+`FeedContextSource.load_snapshot(*, user_id, reference_time, reference_date, recent_period_start,
+recent_period_end)`를 한 번 호출한다. `reference_time`은 UTC instant 기준이고 `reference_date`는
+service local calendar date다. `reference_date`는 server-only Source selection metadata다.
+Snapshot/최종 Context에 `reference_date` 필드를 추가하지 않는다. Source는 전달된 모든 시간값을
+조회·time-based eligibility에 실제 사용하며 자체 `datetime.now()`/`date.today()`나 임의 clock으로
+재계산하지 않는다. UTC 2026-10-09 16:00이면 KST date는 2026-10-10, start는 UTC
+2026-09-09 16:00, end는 같은 reference instant다. DST에서도 window는 elapsed 720시간이다.
 
 Loader는 반환 Snapshot/child instance도 재검증하고 다음 Source invariant를 검사한다.
 Caregiver/summary/log user와 patient caregiver는 `context.user_id`와 같아야 한다.
@@ -230,7 +244,8 @@ Managed patient는 eligible 전체 포함(`total_count == len(items)`), raw ID u
 같은 순서다. Source 환자 순서가 달라도 동일 집합의 mapping/배열은 같다. 임상 중요도/영속 ID/
 완전 익명화가 아닌 Context-local pseudonymous ref이며 집합이 달라지면 번호가 바뀔 수 있다.
 Child/log 순서는 Source대로 보존하고 정렬·ranking·monotonicity 검사를 새로 넣지 않는다.
-Clinical/safety/visit/log의 DESC 계약, medication ordering과 DB tie-break는 Production Source가 구현한다.
+아래 stable ordering과 DB tie-break는 Production Source가 구현한다. Source 환자 순서는 중요도/ranking이
+아니며 Backend `list_patients()`의 `created_at, id` 순서가 Loader의 UUID bytes canonical sort를 대체하지 않는다.
 Unknown CareLog ID를 null로 바꾸지 않으며 **Source의 원래 null만** null ref로 복사한다.
 삭제 환자 provenance/retention은 추론하지 않는다.
 
@@ -250,6 +265,167 @@ Source 호출 exception은 source_load_failed, 반환 DTO/identity 위반은 inv
 공개 args/code 및 우리 일반 로그에 Source/원본 exception/ValidationError input/UUID/text를 포함하지 않는다.
 기존 Workflow는 이를 `FeedWorkflowError(stage="context_load")`로 감싸고 이후 단계를 실행하지 않는다.
 `raise ... from None`은 모든 APM의 exception context/traceback locals 제거를 보장하지 않는다.
+`reference_date`를 계산할 수 없는 service timezone도 기존 `context_validation_failed` 분류를
+유지하며 잘못된 기준 날짜로 Source를 호출하지 않는다. Clock 오류를 이 분류와 혼합하지 않는다.
+
+### V1.1 Backend boundary / projection / ordering
+
+`UserProfileContext` / `PatientContext` / `get_user_profile_context()`는 current-state/demo aggregate다.
+각각 `FeedContextSourceSnapshot` / `SourceManagedPatient` / `FeedPersonalizationContextV1`과 같은
+계약이 아니다. Backend aggregate는 검사 종류별 최신 1건, current medication만, 최근 safety 중
+flag가 true인 row만, 일부 최근 방문 및 예약을 선택한다. CareLog와 Long-term Summary는 없다.
+자체 `today()` / `datetime.now(APP_TIMEZONE)`도 사용하므로 Source 인자를 추가하는 것만으로
+Feed의 시간 계약을 충족하지 않는다. 이를 그대로 Source Snapshot으로 취급하거나 기존 Feed를
+latest assessment/current medication/event-only safety로 축소하지 않는다.
+
+향후 Production Source는 Backend 모델 전체 dump 후 삭제 대신 **명시적 allowlist projection**으로
+필요한 필드만 새 Source 객체에 조립한다. 다음은 Adapter 정책이며 실제 Production Adapter는 없다.
+
+| Backend DTO → Source DTO | 사용하는 필드 | 제외하는 필드 |
+|---|---|---|
+| `CaregiverProfileOut → SourceCaregiverProfile` | `user_id`, `relationship`, `burden_score`, `mood_score`, `lifestyle_tags`, `updated_at` | allowlist 밖 모든 필드 |
+| `PatientOut → SourceManagedPatient` 기본 프로필 | `id → patient_id`, `caregiver_id`, `dementia_stage`, `diagnosis_date`, `symptoms`, `interests`, `updated_at` | `name`, `created_at` |
+| `AssessmentOut → SourceClinicalAssessment` | `patient_id`, `assessment_type`, `score`, `result_detail`, `assessed_at` | `id`, `assessed_by`, `created_at` |
+| `SafetyEventOut → SourceSafetyEvent` | `patient_id`, `event_date`, `has_fall`, `has_wandering`, `has_missing`, `note` | row `id`, `created_at` |
+| `MedicationOut → SourceMedication` | `patient_id`, `drug_name`, `is_taking`, `start_date`, `end_date`, `note` | `id`, `dosage`, `frequency`, `created_at`, `updated_at` |
+| `MedicalVisitOut → SourceMedicalVisit` V1 | `patient_id`, `visit_date`, `is_visited`, `department`, `visit_content` | `hospital_name`, row `id`, `created_at`, `updated_at`, 005 신규 상세 필드 |
+
+Patient의 종속 collection/count는 별도 Feed Read 결과가 제공해야 한다. Backend float score를
+현재 Source Decimal로 연결할 때 non-null 값에는 `Decimal(str(score))` 수준의 기계적 변환만 허용한다.
+임상적 rounding/해석을 하지 않으며 float에서 잃은 정밀도를 복원한 것으로 간주하지 않는다.
+향후 Feed 전용 Backend DTO가 Decimal을 직접 보존하는 것이 바람직하다.
+
+현재 Backend 조회 코드로 확인된 Source stable ordering baseline:
+
+| Collection | Ordering |
+|---|---|
+| Clinical Assessment | `assessed_at DESC → created_at DESC → id` |
+| Safety Event | `event_date DESC` (환자/날짜별 UNIQUE) |
+| Medication | `is_taking DESC → start_date DESC NULLS LAST → created_at DESC → id` |
+| Medical Visit | `visit_date DESC → created_at DESC → id` |
+| CareLog | `logged_at DESC` + future Backend Feed Read Contract의 deterministic tie-break |
+
+`created_at` / raw DB `id`는 server-side tie-break에만 쓰며 final Context로 노출하지 않는다.
+Medication ordering은 이 기준으로 확정하지만 **ordering != eligibility**다. Current-only selection을
+Feed eligibility로 승격하지 않으며 Loader는 child/log 배열을 재정렬하지 않는다.
+
+Collection별 temporal semantics는 Backend Feed Read Contract에서도 보존해야 한다.
+
+| Collection | Temporal semantics |
+|---|---|
+| Clinical Assessment | future `assessed_at` 불가 |
+| Safety Event | future `event_date` 불가; false flag row도 의미 보존 |
+| Medication | future start/end 허용, 양쪽 값이 있으면 start ≤ end; `is_taking`/date conflict 자동 보정 금지 |
+| Medical Visit | future reservation + false 허용; future + `is_visited=true` 불가 |
+| CareLog | exact `[recent_period_start, recent_period_end)` |
+| Long-term Summary | start ≤ end ≤ reference date; generated instant ≤ reference instant; end ≤ generated service date |
+
+모든 collection에 동일한 date cutoff를 적용하지 않는다. 명시된 Source eligibility로 조회 전에
+제외하는 것은 정상 selection이고 반환된 Contract-invalid row는 validation failure다.
+Loader의 사후 invalid row 삭제는 금지하며 Source의 계약 밖 임의 filter도 Contract 위반이다.
+**Source-level eligibility filter는 명시된 Feed Read Contract에 따라서만 적용하며,
+반환된 record의 validation 실패를 숨기기 위한 사후 필터로 사용해서는 안 된다.**
+
+### V1.1 Backend Feed Read success / failure / snapshot
+
+성공한 Backend Feed Read는 대상 user가 존재하고 trusted user scope 접근이 허용되며,
+모든 required read와 collection count가 완료되고 required single logical snapshot이 충족된
+완전한 결과를 뜻한다. Loader의 `reference_time`, `reference_date`, recent period를 모두 사용하고
+partial failure가 없어야 한다. 함수가 값을 반환했다는 사실만으로 성공을 선언하지 않는다.
+
+이 성공 조건이 충족된 뒤에만 **Empty = successful absence**로 해석한다.
+
+| 성공한 read 결과 | 의미 |
+|---|---|
+| `caregiver_profile=None` | user는 존재하고 profile 조회에 성공했지만 profile row 없음 |
+| managed patients `items=[], total_count=0` | patient 조회 성공, eligible patient 없음 |
+| recent CareLogs `items=[], total_count=0` | recent window 조회 성공, eligible log 없음 |
+| `long_term_summary=None` | summary 조회 성공, eligible summary 없음 |
+
+User 미존재, trusted scope 권한 실패, DB/query 실패, 필수 sub-read 일부 실패, count 실패,
+snapshot 보장 실패, temporal selection 실패, required read path 미구현, schema/function 미준비,
+일부 patient/collection만 성공하거나 기타 계약 수행이 불완전한 상태는 **read failure**다.
+User 없음 → empty patients, CareLog 실패 → 0/0, Summary 미구현 → None, count 실패 →
+`total_count=len(items)`, 일부 patient 실패 → 성공한 patient만 반환하는 변환을 금지한다.
+Partial read를 정상 Snapshot으로 승격하지 않고 fail-fast한다.
+
+Backend 구현 형태는 담당자가 결정한다. Success는 explicit Backend Feed Snapshot DTO,
+Failure는 explicit exception 또는 unambiguous failure result를 권장한다. 하나의
+`get_feed_context_snapshot(...) -> None`이 user 없음/권한 실패/정상 empty/query failure를 동시에
+표현하는 모호한 계약을 피한다. Backend DTO를 AI Source DTO와 동일하게 만들 필요는 없다.
+이 문서에서 새 Backend DTO/function을 구현하지 않는다.
+
+| Boundary | 기존 Loader error |
+|---|---|
+| Backend Feed Read failure → Production Source call failure | `source_load_failed` |
+| Source DTO structure/type 또는 ownership/count/cross-ref 위반 | `invalid_source_snapshot` |
+| Projection 수행 실패 | `context_assembly_failed` |
+| Final Context temporal/semantic validation 실패 | `context_validation_failed` |
+
+새 error code는 없다. Backend raw exception text/DB details/UUID/free text/ValidationError input을
+공개 error나 일반 로그에 추가하지 않는다. `invalid_request`/`invalid_clock`도 기존 분류를 유지한다.
+
+`total_count`는 **동일 logical snapshot**에서 authorization + 명시된 eligibility + temporal/base
+filter를 통과한 eligible population 전체 수이며 return limit **이전** count다. Generic
+`len(items)` fallback은 금지한다. 예를 들어 eligible 150건을 limit 100으로 반환했다고 total을
+100으로 만들지 않는다. 현재 list helper의 pre-limit count 부재는 Production integration blocker다.
+Managed patients는 `total_count == len(items)`로 eligible 전체 집합을 포함해야 한다.
+`list_patients()`가 limit 없이 반환하는 것만으로 auth/count/snapshot 계약을 대체하지 않는다.
+
+Single logical snapshot은 read/count가 같은 일관된 DB 상태를 관찰하는 보장이다.
+`reference_time`의 instant 기준 및 `reference_date`의 service calendar 기준과 구분하며,
+mutable profile의 historical as-of reconstruction을 요구하지 않는다. `get_caregiver_profile()`,
+`list_patients()`, `list_assessments()`, `list_safety_events()`, `list_medications()`,
+`list_medical_visits()`를 단순 순차 호출하는 것으로 충족했다고 간주하지 않는다.
+PostgreSQL `READ COMMITTED`에서는 같은 transaction도 statement별 snapshot이 다를 수 있다.
+Backend/DB가 composite Feed Read Contract 또는 동등한 consistent snapshot boundary를 제공해야
+하며 isolation/transaction 방식도 그 계층 책임이다. AI가 `app/db/connection.py`를 직접 사용하거나
+raw SQL/transaction으로 우회하지 않는다.
+
+### V1.1 provenance / canonical metadata / integration status
+
+CareLog는 Backend 데모 aggregate에 없어도 V1에서 유지한다. 향후 read는 trusted user scope,
+exact recent window, 현재 managed patient set의 eligible logs와 정책상 허용된 `patient_id=None`
+records, stable ordering 및 pre-limit total을 제공해야 한다. Null은 caregiver self-care를 뜻하지
+않으며 `ON DELETE SET NULL`로 삭제 환자와 과거 연결된 row일 수 있다. 삭제 환자 retention/
+eligibility는 미확정이다. Summary도 계속 user-scoped derived personalization context이며
+patient clinical memory가 아니다. Read 계약은 user scope, reference 기반 eligibility, latest eligible
+row deterministic selection과 `period_start`, `period_end`, `summary`, `updated_tags`, `generated_at`을
+제공해야 한다. 조회 기능 부재/실패를 None으로 숨기지 않는다.
+
+Migration 005 이후 정상 신규 write의 `visit_content`는 **기타 자유 메모**다. 기존 값은 structured
+column으로 backfill되지 않아 legacy row에서는 과거 전체 진료 내용 원문일 수 있다. Source/Loader는
+원문 untrusted data를 보존하고 재분류/임의 parsing/추정 이동하지 않는다. 신규 `visit_reason`,
+`diagnosis`, `treatment_content`, `test_summary`, `medication_change`, `doctor_note`, `follow_up_plan`은
+SourceMedicalVisit/MedicalVisitContext V1에 추가하지 않고 `visit_content`에 concat하거나 일부만
+임의 선택하지 않는다. Legacy 원문을 이들 field로 추론 분해하지 않는다. 향후 Context revision에서
+privacy/token budget/provenance와 함께 포함 범위를 검토한다.
+
+Backend 정상 write path의 canonical provenance는 burden score = Zarit 계열 0–88,
+mood score = PHQ-9 0–27이며 stage vocabulary는 `경도인지장애`, `경도`, `중등도`, `중증`이다.
+이를 Context의 strict int/null 범위 validator나 stage Literal로 강화하지 않는다. Loader는 unknown/
+legacy 저장값을 재분류·삭제하지 않고 severity/cutoff/진단을 계산하지 않는다. Context V1의
+defensive raw-value 경계는 그대로다.
+Assessment metadata 정본은 `app.user_schemas.ASSESSMENT_TYPES` / `list_assessment_types()`이며
+canonical type, min/max/step/allowed/higher_is_worse를 제공한다. 이를 각 사용자 Context에 복제하거나
+새 필드로 넣지 않고 unknown/legacy assessment type도 새 validator로 거부하지 않는다.
+Retrieval Planner의 활용 방식은 후속 Planner/Prompt Policy다.
+
+책임 흐름은 `Trusted AgentContext.user_id → ProductionFeedContextSource → Backend internal Feed
+Read Contract → DB access layer`다. 데모 `/feed*` HTTP API를 AI에서 다시 호출하는 구조를 기본으로
+채택하지 않으며 앱 API authentication과 내부 trusted identity boundary를 혼합하지 않는다.
+향후 Backend read 입력은 개념적으로 `user_id`, `reference_time`, `reference_date`,
+`recent_period_start`, `recent_period_end`다. 실제 함수명/DTO 형식은 Backend 담당자가 결정한다.
+
+**ProductionFeedContextSource는 미구현**이다. 필요한 Backend blocker는 CareLog Feed read,
+Long-term Summary read, pre-limit count-aware collections, single logical snapshot,
+Feed Read success/failure semantics의 Backend 구현이다. 기존 helper를 조합한 임시 Production
+Source, 정상 empty로 위장한 미구현 데이터, HTTP/API wiring을 추가하지 않는다.
+V1 Context와 AI-side Loader Policy V1.1은 완료하지만 Production DB integration은 미완료다.
+삭제 환자 Summary invalidation/regeneration, future patient/child limits, latest Summary selection
+algorithm, token/input budget, visit detail 확장, free-text privacy/redaction, cache/retry/degraded mode,
+Production APM privacy 및 Source wiring은 후속이다. Timezone binding/reference_date 전달,
+Medication stable ordering, aggregate와 Source 구분, empty와 read failure 의미는 V1.1에서 확정했다.
 
 **AI-side Loader implementation complete**: Fake Source로 DTO/시간/identity/projection/coverage/
 오류 및 Workflow 전달·fail-fast를 검증했다. **Production Feed Context integration은 후속**이다.
@@ -650,7 +826,8 @@ Fake ToolSpec은 `test_only=True`이며 production Registry 등록 시 오류가
 
 ## 다음 실제 연결 단계: 팀 합의 필요
 
-현재 DB 함수는 논문 수집/조회/분석/임베딩 관련 함수뿐이다.
+현재 DB에는 논문 수집/조회/분석/임베딩 함수와 사용자·환자 조회 helper가 있다.
+사용자·환자 aggregate와 완전한 Feed Source 계약의 차이 및 Backend blocker는 위 V1.1을 따른다.
 3개 Tool 중 **현재 계약만으로 바로 운영 연결 가능한 Tool은 없다**. 실제 연결은 다음 작업이다.
 
 | Tool | 필요한 backing 계약/합의 |

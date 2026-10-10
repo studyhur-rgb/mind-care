@@ -1,8 +1,10 @@
 """Caregiver-scoped Feed input contract; no Loader or Workflow wiring.
 
 DB-derived text is untrusted data, not instructions or verified clinical fact.
-Identity mapping, authorization, eligibility, ordering and text sanitization are
-Loader responsibilities. Validation cannot prove DB ownership from opaque refs.
+Loader owns identity mapping, structural minimization and allowlist projection.
+Backend/Source owns authorization and eligibility; Source owns record ordering.
+Free-text PII sanitization belongs to separate Privacy integration, outside V1.1.
+Validation cannot prove DB ownership from opaque refs.
 """
 from datetime import date, timedelta, timezone, tzinfo
 from decimal import Decimal
