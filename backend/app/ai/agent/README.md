@@ -45,8 +45,9 @@ Care Logs와 장기 요약은 명령이 아닌 untrusted data로 전달해야 �
 공유 `AgentContext`의 `patient_id`는 유지하지만 V1 Loader는 Feed 범위 선정에 사용하지 않고
 `user_id`만 사용한다. 기존 환자 단위 Tool Contract를 caregiver aggregation 계약으로 바꾸지 않는다.
 
-Retrieval Planner는 한 번의 Direct Structured LLM으로 topic/reason/query 계획을 만드는
-후속 연결 경계다. “이 간병인이 돌봄을 수행하면서 관심 있게 볼 가치가 있는 최신 연구 주제는
+Production Retrieval Planner는 topic/reason/query 계획을 만드는 후속 연결 경계다.
+독립 Demo `FeedRetrievalPlannerV1`은 아래의 고정 catalog 규칙으로 계획만 생성하며 LLM을 호출하지 않는다.
+“이 간병인이 돌봄을 수행하면서 관심 있게 볼 가치가 있는 최신 연구 주제는
 무엇인가?”를 위 Context로 판단하는 방향이다. 특정 환자에게 연구 결과가 직접 적용된다고
 단정하거나 여러 환자 정보를 하나의 환자 상태로 병합하지 않는다. Query는 돌봄/건강 연구
 개념으로 일반화하고 환자 이름/직접 식별정보를 포함하지 않아야 한다.
@@ -76,7 +77,7 @@ Dependency는 실패/거부 시 예외를 발생시키며 `FeedWorkflowError.sta
 반환한다. 부분/전체 item 제외는 Fake의 주입 정책으로만 검증하며 운영 filtering/no-feed 결과
 계약을 확정하지 않았다. DB 저장/중복 방지/idempotency도 미구현이다.
 
-후속 계약/연결: Production Feed Context Source integration, `FeedRetrievalPlan`, `FeedAnswerV2`,
+후속 계약/연결: Production Feed Context Source integration, V1 Plan execution wiring, `FeedAnswerV2`,
 `SelectedEvidenceContext`, EvidenceReference → 내부 paper_id, 다중 source persistence.
 장기 요약의 입력 projection은 `profile_summaries`에 대응하지만 최신 row 선택/조회 정책과
 `chat_messages` 활용 방식은 확정하지 않았다. Real Backend Context Loader,
@@ -439,7 +440,7 @@ Medication stable ordering, aggregate와 Source 구분, empty와 read failure �
 | `FeedPersonalizationContextV1` | AI가 받을 수 있는 구조·데이터 의미·무결성 |
 | `FeedUserProfileSourceMappingV1` | Backend UserProfileContext의 scope consistency/명시 필드 검사, caregiver allowlist, patient projection 및 Demo 입력 조립 |
 | Feed Context Loader Policy | scope, eligibility E, inclusion I, count, 시간, snapshot, fail-fast |
-| Feed Retrieval Plan | 일반화 연구 주제/query, ranking, recency/relevance/diversity (실제 Planner는 후속) |
+| Feed Retrieval Plan | 독립 Demo V1 고정 catalog/greedy 계획 구현. Production ranking, recency/relevance/diversity 및 실행 연결은 후속 |
 
 **실제 Backend PatientContext 계약.** `app.user_schemas.PatientContext`는 structured patient profile과
 selected current-state-oriented signal source다. `FeedContextSourceSnapshot`이나 full V1 Context와
@@ -545,10 +546,89 @@ Backend read까지 전달하는 Production 시간 계약은 후속이다.
 
 `PROFILE_PLANNING_AVAILABLE_SOURCES`는 기존 sources에 `caregiver_profile`을 추가한 immutable
 server-side 설정이며 payload에 직렬화하지 않는다. Demo Planner는 unavailable source를 successful absence로
-해석하지 않는다. 실제 Demo Planner/RAG/Feed 생성 및 Production Source wiring은 아직 없다.
+해석하지 않는다. Demo RAG/Feed 생성 및 Production Source wiring은 아직 없다.
 이 Mapping은 합성/개발용 Demo 경계다. Relationship/lifestyle_tags/symptoms/interests/note/visit_content의
 free-text PII를 sanitize하지 않으며 실환자 데이터를 외부 LLM Provider에 전송할 수 있다는 승인으로 보지 않는다.
-다음 독립 단계는 `FeedRetrievalPlanV1`이며 query generation/RAG/Agent/recommendations 연결은 구현하지 않았다.
+독립 `FeedRetrievalPlanV1` Planner는 아래와 같이 구현했으며 RAG/Agent/recommendations 연결은 구현하지 않았다.
+
+### FeedRetrievalPlanV1 — Planner-only Demo 경계
+
+`workflows/feed_retrieval_planning.py`의 `FeedRetrievalPlannerV1`은 trusted
+`FeedProfilePlanningInputV1`을 받아 구조·의미 검증을 통과한 계획만 반환한다.
+
+```text
+Backend profile → auth/scope/time 검증 + UserProfile Mapping(service_timezone)
+→ FeedProfilePlanningInputV1 → FeedRetrievalPlannerV1
+→ FeedRetrievalPlanV1 → structure + complete semantic validation → STOP
+```
+
+Caller가 기존 Mapping의 timezone context와 scope/time 검증을 제공해야 한다. Planner는 raw JSON parser,
+authorization 계층 또는 timezone resolver가 아니다. 입력을 전체 `model_validate()`로 다시 해석하거나
+시계/DB를 읽지 않고, 지원하는 signal 값만 즉시 immutable snapshot으로 복사한다. 입력 DTO를 변경하지 않는다.
+Unavailable source는 successful absence가 아니며 CareLog/Summary를 profile field로 위장하여 넣지 않는다.
+
+| 구분 | 보장 또는 V1 정책 |
+|---|---|
+| Core/Safety | 개인정보·narrative query 삽입 금지, scope/provenance 정직성, 승인된 query, 임상 추론 금지, malformed/config failure 거부, version-aware validation |
+| V1 Policy | 정확한 alias 정규화와 1:1 mapping, priority, greedy coverage, 3/5 shape, 결정적 순서. 이후 정책은 새 버전으로 변경 |
+
+Plan에는 required `schema_version="feed-retrieval-plan-1"`,
+`policy_version="feed-retrieval-policy-1"`, `tasks`만 있다. Task는 최종 순서대로 `task_1`~`task_3`,
+`topic_key`, catalog의 고정 `query`, 정수 `top_k=5`, nonempty `signal_refs`를 갖는다.
+Ref identity는 `(scope, patient_ref, field, signal_key)`이며 caregiver의 ref는 null,
+patient의 ref는 입력에 존재하는 request-local ref다. DB identity나 요청 간 cache key로 사용하지 않는다.
+`task_id`도 `patient_ref`와 마찬가지로 단일 Planning 요청 내부에서만 의미가 있는 reference다.
+`task_1`, `task_2`, `task_3`은 최종 selection order에 따라 부여되며 요청 간 영속 identity가 아니다.
+DB primary key, cache identity 또는 cross-request provenance key로 사용하지 않는다.
+Policy/priority/diversity가 변경되면 같은 topic도 다른 `task_id`를 받을 수 있다.
+Ref는 caregiver 먼저 → patient_ref 문자열 lexical 순 → 아래 field 순 → signal_key lexical 순으로 정렬한다.
+
+지원 field/priority는 interests(1), positive safety flags(2), symptoms(3),
+caregiver relationship/lifestyle_tags(4), 명시된 recognized dementia_stage(5),
+recognized assessment_type(6)다. Field 순서는 interests, recent_safety_events, symptoms,
+relationship, lifestyle_tags, dementia_stage, latest_assessments다. 반복 횟수로 priority를 올리지 않는다.
+Assessment score/result_detail, burden/mood score, medications, visits, notes 및 narrative는 읽거나 해석하지 않는다.
+검사명은 일반 연구 topic 신호이며 score로 stage/중증도/악화를 추론하지 않는다.
+
+정규화는 NFKC → trim → 연속 공백을 ASCII space 하나로 축약 → casefold 순이다.
+Punctuation 삭제, 띄어쓰기 추론, substring/semantic/fuzzy matching은 없다. Unknown alias/stage/type은
+정상 skip이며 빈 tasks는 허용한다. 빈 계획은 연구가 없거나 돌봄 필요가 없다는 판정이 아니다.
+서버의 frozen tuple catalog는 초기 17개 topic을 포함한다. `(scope, field, normalized_alias)`는
+단일 signal_key, `(scope, field, signal_key)`는 단일 topic, topic은 단일 query로 대응한다.
+환자 수면과 간병인 수면은 별도 topic/query다. 이름, UUID, ref, 전화/주소, 원문을 query에 보간하지 않는다.
+Catalog의 중복 key/query, blank/길이 초과 query, 잘못된 scope/field, blank alias,
+alias 충돌 또는 signal의 복수 topic 매핑은 전체 실패다. Catalog/query/mapping 및 정규화·priority·선택 규칙
+변경은 policy_version 변경 대상이며 payload가 catalog를 구성할 수 없다.
+
+동일 topic은 모든 supporting refs를 dedup/merge하고 가장 낮은 priority를 사용한다.
+다른 환자의 신호를 synthetic patient/복합 query로 합치지 않는다. 최대 3개 선택은 greedy 방식으로,
+매 단계 새 provenance group(caregiver 또는 각 patient_ref)의 gain 최대 → priority 최소 → topic_key lexical
+→ canonical provenance key 순이다. 각 group의 weight는 1이며 gain이 모두 0이면 priority/동일 tie-break로
+채운다. 전역 최대 coverage를 보장하지 않는다. Task 수 3, 검색별 top_k 5, 향후 최종 Feed 0~5개는 별개다.
+same-PMID dedup이나 정확히 5개 fallback은 Planner 책임이 아니다.
+
+`validate_retrieval_plan_v1(plan, planning)`은 constructed/mutated nested DTO까지 primitive payload로
+구조 재검증하고, Planner와 공유하는 extraction/merge/selection helper로 전체 기대 결과를 계산한다.
+Query/top_k/version/task 순서뿐 아니라 선택 topic과 **모든** supporting refs 및 canonical 순서를 대조한다.
+존재하는 ref 하나를 누락해도 실패한다. Unsupported schema/policy version은 거부하고 오류는 source 값을
+노출하지 않는 고정 `FeedRetrievalPlanningError`로 전체 실패한다. 로그, repair/retry 또는 partial plan은 없다.
+
+Plan의 list는 mutable이다. 향후 실행 admission은 schema_version과 policy_version 모두를 검사하고
+검증 후 immutable execution snapshot으로 변환하거나 실행 직전에 의미 검증을 다시 해야 한다.
+`frozen=True`만으로 nested list 변경을 막았다고 주장하지 않는다. 실제 RAG/LLM/FeedWorkflow,
+Runner/Tool/registry, Production Source, DB/API 연결과 CareLog/Summary 기반 planning은 구현하지 않았다.
+Production adapter는 동일 의미를 보존해야 하며 새 signal category는 V2 계약으로 확장한다.
+
+이 catalog는 초기 수작업 연구 질문이며 실제 검색 품질·관련성·효과를 검증한 결과가 아니다.
+향후 canonical match coverage/empty-plan rate/topic 반복/provenance coverage, evidence yield/Feed fill rate 및
+전문가 평가를 aggregate 지표로 확인해야 한다. 고정 query의 개인정보 경계는 전체 Prompt PII sanitization이나
+실환자 외부 Provider 전송 승인을 대신하지 않는다.
+
+독립 offline 검증 (`backend/`):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_retrieval_planning -v
+```
 
 **전체 prompt/query privacy.** `FeedPromptBuilder`를 공용 `AgentLoopRunner`에 주입한다.
 FeedWorkflow는 construction과 agent 실행 직전에 이 builder를 확인하여 DefaultPromptBuilder의
