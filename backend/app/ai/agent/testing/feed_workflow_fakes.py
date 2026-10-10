@@ -6,6 +6,7 @@ from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import AgentContext, ModelTurn
 from ..tools import contracts as c
 from ..workflows.feed import FeedWorkflow
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .fake_llm import FakeLLMClient
 from .fake_tools import fake_get_recent_care_logs, fake_search_evidence
 
@@ -58,6 +59,7 @@ class FakeFeedDependencies:
         self.client = FakeLLMClient(client_turns)
         self.runner = AgentLoopRunner(self.client,
             build_feed_test_registry(query_validator=self.validate_query),
+            prompt_builder=FeedPromptBuilder(),
             max_tool_rounds=3, max_total_tool_calls=3)
 
     def _enter(self, stage, *received):

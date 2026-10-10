@@ -66,6 +66,7 @@ def _project_collection(source: s.SourceCollection[T],
 
 
 def _collection_payload(total: int, items: list[dict[str, object]]) -> dict[str, object]:
+    # Source supplies |E|; returned items are I. Selection need not be SQL LIMIT.
     return {"items": items, "coverage": {
         "total_count": total, "included_count": len(items), "is_truncated": len(items) < total,
     }}

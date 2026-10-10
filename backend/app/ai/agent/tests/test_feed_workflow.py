@@ -14,6 +14,7 @@ from ..testing.feed_workflow_fakes import FakeFeedDependencies, STAGES, build_fe
 from ..tools.contracts import EvidencePackage, EvidenceSearchInput
 from ..workflows import feed
 from ..workflows.feed import FeedWorkflow, FeedWorkflowError
+from ..workflows.feed_prompts import FeedPromptBuilder
 
 
 CONTEXT = AgentContext(request_id="fake-feed-workflow", user_id=UUID(int=1), patient_id=UUID(int=2))
@@ -133,6 +134,7 @@ class FeedWorkflowTests(unittest.TestCase):
         deps.runner = AgentLoopRunner(deps.client, build_feed_test_registry(
             query_validator=deps.validate_query,
             handler=lambda context, args: EvidencePackage(query=args.query, evidence=[])),
+            prompt_builder=FeedPromptBuilder(),
             max_tool_rounds=3, max_total_tool_calls=3)
         self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
         self.assertEqual(deps.search_queries, ["synthetic care"])

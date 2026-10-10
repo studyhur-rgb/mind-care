@@ -84,6 +84,19 @@ def full():
 
 
 class FeedContextContractTests(unittest.TestCase):
+    def test_frozen_public_v1_field_sets(self):
+        expected = {
+            c.FeedPersonalizationContextV1: {"schema_version", "reference_time", "caregiver_profile",
+                "managed_patient_profiles", "recent_care_context", "long_term_summary"},
+            c.ManagedPatientContext: {"patient_ref", "dementia_stage", "diagnosis_date", "symptoms",
+                "interests", "updated_at", "clinical_assessments", "safety_events", "medications", "medical_visits"},
+            c.MedicalVisitContext: {"visit_date", "is_visited", "department", "visit_content"},
+            c.CollectionCoverage: {"total_count", "included_count", "is_truncated"},
+        }
+        for model, fields in expected.items():
+            with self.subTest(model=model.__name__):
+                self.assertEqual(set(model.model_fields), fields)
+
     def validate(self, data, service_timezone=SERVICE_TZ):
         return c.FeedPersonalizationContextV1.model_validate(
             data, context={"service_timezone": service_timezone},

@@ -21,7 +21,12 @@ T = TypeVar("T")
 
 
 class SourceCollection(FeedSourceModel, Generic[T]):
-    """Eligible count after authorization/base/time filters, before return limit."""
+    """Count of declared eligible E, before inclusion/selection I (I subset E).
+
+    items represent I, including selection without LIMIT. Never infer |E| from
+    an aggregate's returned length or missing history; required reads must all
+    succeed independently of these numeric invariants.
+    """
 
     items: list[T]
     total_count: StrictInt = Field(ge=0)
@@ -131,10 +136,13 @@ class FeedContextSource(Protocol):
 
         Backend/Source owns user existence, trusted-scope authorization and
         explicit Feed Read eligibility. Backend/DB must complete every required
-        read and pre-limit count in one consistent logical snapshot. That means
+        read and pre-inclusion count in one consistent logical snapshot. That means
         reads/counts observe the same DB state, not historical as-of recovery of
         mutable profiles. Sequential helpers or merely sharing a transaction
         do not establish snapshot consistency; isolation is Backend/DB-owned.
+        reference_time anchors temporal selection/validation, not DB AS-OF.
+        Source/Loader/Planner must share declared collection-specific E/I
+        policies; assessment/safety/medication/visit history scope is unresolved.
 
         Only after successful reads can None/empty/zero mean eligible data is
         absent. Missing users, denied access, unimplemented paths, query/count/

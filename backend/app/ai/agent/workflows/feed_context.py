@@ -23,7 +23,11 @@ class _ContextModel(AgentModel):
 
 
 class CollectionCoverage(_ContextModel):
-    """Eligible records in the same logical snapshot, before payload truncation."""
+    """For declared policy E/I: total=|E|, included=|I|, truncated=(|I|<|E|).
+
+    Inclusion can select records without a SQL LIMIT. Counts describe that
+    policy's eligible population, not all DB history or read completeness.
+    """
 
     total_count: StrictInt = Field(ge=0)
     included_count: StrictInt = Field(ge=0)
@@ -63,7 +67,11 @@ class CaregiverProfileContext(_ContextModel):
 
 
 class ClinicalAssessmentContext(_ContextModel):
-    """Unknown assessment types remain valid; score interpretation is separate."""
+    """Recorded assessment, not guaranteed current clinical state.
+
+    Unknown types remain valid. Codebook/direction metadata is not diagnosis,
+    cross-test score comparison, version normalization or a severity engine.
+    """
 
     assessment_type: StrictStr
     score: Decimal | None

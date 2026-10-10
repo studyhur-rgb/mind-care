@@ -4,6 +4,7 @@ from typing import Callable, Literal, Protocol
 from ..agent_loop_runner import AgentLoopRunner
 from ..registry import ToolName
 from ..schemas import AgentContext
+from .feed_prompts import FeedPromptBuilder
 
 
 FeedStage = Literal[
@@ -41,6 +42,8 @@ def run_feed_agent_loop(runner: AgentLoopRunner, context: AgentContext,
 
 
 def _validate_feed_runner(runner: AgentLoopRunner) -> None:
+    if not isinstance(runner.prompt_builder, FeedPromptBuilder):
+        raise ValueError("Feed runner requires FeedPromptBuilder")
     names = [definition["function"]["name"] for definition in runner.registry.definitions()]
     if names != [ToolName.SEARCH_EVIDENCE.value]:
         raise ValueError("Feed runner must expose search_evidence only")

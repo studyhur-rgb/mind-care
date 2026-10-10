@@ -124,6 +124,8 @@ Context-local opaque reference(예: `patient_1`)로 변환한다. 영구 identit
 (`total_count`, `included_count`, `is_truncated`)로 구성한다. 두 count는 strict non-negative int이며
 `included_count == len(items) <= total_count`, `is_truncated == (included_count < total_count)`를 강제한다.
 Total은 동일 논리적 snapshot에서 authorization과 정의된 eligibility/basic filter를 통과한 수다.
+아래 Alignment의 E/I 의미를 따른다. `is_truncated`는 SQL LIMIT 유무가 아니라 eligible 대비
+실제 inclusion/selection 누락 여부다. Coverage 숫자만으로 DB 전체 history를 추론하지 않는다.
 빈 `items`, count 0/0, false는 정상 조회 결과다. DB/Loader 실패를 empty/null로 위장하지 않는다.
 `care_logs.coverage`는 **선택된 관리 환자 집합 + eligibility상 허용된 비귀속 기록** 범위의 완전성이다.
 False여도 간병인의 모든 환자 기록이 포함되었다는 뜻은 아니다. 조회 limit/선택 알고리즘은 payload에 없다.
@@ -216,7 +218,7 @@ patient의 `patient_id`/`caregiver_id`, 각 child의 `patient_id`, CareLog의 `u
 `patient_id`만 ownership 검사에 사용한다. 이름/병원명/assessed_by/dosage/frequency는 Source에도 없다.
 `SourceCollection[T]`의 `items`, strict non-negative `total_count`는 required이고
 `len(items) <= total_count`다. Total은 authorization + eligibility + temporal/base filter 이후,
-반환 limit 이전의 eligible 수이며 빈 성공은 명시적 `items=[]`, `total_count=0`이다.
+inclusion/selection 이전의 eligible 수이며 빈 성공은 명시적 `items=[]`, `total_count=0`이다.
 
 `DefaultFeedContextLoader`는 keyword-only `source`, `clock`, `service_timezone`을 필수 주입받는다.
 `__call__(context, recent_days=30)`만 허용하며 다른 값은 Source/clock 호출 전에 `invalid_request`다.
@@ -366,7 +368,7 @@ Failure는 explicit exception 또는 unambiguous failure result를 권장한다.
 공개 error나 일반 로그에 추가하지 않는다. `invalid_request`/`invalid_clock`도 기존 분류를 유지한다.
 
 `total_count`는 **동일 logical snapshot**에서 authorization + 명시된 eligibility + temporal/base
-filter를 통과한 eligible population 전체 수이며 return limit **이전** count다. Generic
+filter를 통과한 eligible population 전체 수이며 inclusion/selection **이전** count다. Generic
 `len(items)` fallback은 금지한다. 예를 들어 eligible 150건을 limit 100으로 반환했다고 total을
 100으로 만들지 않는다. 현재 list helper의 pre-limit count 부재는 Production integration blocker다.
 Managed patients는 `total_count == len(items)`로 eligible 전체 집합을 포함해야 한다.
@@ -426,6 +428,123 @@ V1 Context와 AI-side Loader Policy V1.1은 완료하지만 Production DB integr
 algorithm, token/input budget, visit detail 확장, free-text privacy/redaction, cache/retry/degraded mode,
 Production APM privacy 및 Source wiring은 후속이다. Timezone binding/reference_date 전달,
 Medication stable ordering, aggregate와 Source 구분, empty와 read failure 의미는 V1.1에서 확정했다.
+
+### Patient Profile Alignment / Feed Source Integration
+
+기존 V1 Pydantic field/type/validator/`schema_version="1"`은 그대로 유지한다.
+이번 보강은 Source Mapping, Coverage의 의미와 profile-only planning/전체 prompt 경계를 구현한다.
+
+| 계층 | 책임 |
+|---|---|
+| `FeedPersonalizationContextV1` | AI가 받을 수 있는 구조·데이터 의미·무결성 |
+| `PatientProfileSourceMappingV1` | Backend DTO의 explicit allowlist projection 및 server-only ownership/identity 경계 |
+| Feed Context Loader Policy | scope, eligibility E, inclusion I, count, 시간, snapshot, fail-fast |
+| Feed Retrieval Plan | 일반화 연구 주제/query, ranking, recency/relevance/diversity (실제 Planner는 후속) |
+
+**실제 Backend PatientContext 계약.** `app.user_schemas.PatientContext`는 structured patient profile과
+selected current-state-oriented signal source다. `FeedContextSourceSnapshot`이나 full V1 Context와
+동일하지 않으며 selected list에 없는 history가 DB에도 없다고 판단하지 않는다.
+
+| Backend field | 현재 실제 selection / ordering / nullable |
+|---|---|
+| `patient` | `PatientOut`: required `id`, `caregiver_id`, `created_at`, `updated_at`; nullable `name`, `dementia_stage`, `diagnosis_date`; `symptoms`, `interests`는 list. Raw identity는 server-only, 이름/created_at 제외 |
+| `latest_assessments` | type별 latest 1건: `assessment_type → assessed_at DESC → created_at DESC → id`, 결과는 type 이름순. 기간 cutoff 없음. `score: float \| None`, `result_detail: str \| None`, `assessed_by: str \| None` |
+| `current_medications` | `is_taking=True` filter만 적용; start/end cutoff 없음. `is_taking DESC → start_date DESC NULLS LAST → created_at DESC → id`. Nullable start/end/note/dosage/frequency |
+| `recent_safety_events` | Backend service today 기준 `[today-(PROFILE_SAFETY_DAYS-1), today]` 양끝 포함(현재 30 calendar dates), `event_date DESC`. `list_safety_events` 기본 limit 100 이후 true flag 하나 이상인 row만 유지. Nullable note |
+| `recent_visits` | `is_visited=True`, `visit_date DESC → created_at DESC → id`, `PROFILE_RECENT_VISITS=3`. 기간 cutoff 없음 |
+| `upcoming_visits` | `is_visited=False`, `visit_date >= today` (오늘 포함). DESC helper 결과를 전체 reverse하여 가까운 날짜부터; 동률 tie-break도 뒤집힘. helper 기본 limit 100 |
+
+위 5개 selected list는 Backend DTO에서 default empty를 허용하지만, 그것이 required read 성공의
+증거는 아니다. 각 child DTO는 required row `id`/`patient_id`/`created_at`을 갖고 medication/visit에는
+`updated_at`도 있다. Visit은 nullable `department`, `visit_content`, `hospital_name`과 005 상세 필드를
+직접 제공한다. AI projection은 위 V1.1 allowlist만 사용하고 raw row ID를 final input에 넣지 않는다.
+`get_patient_context`/`get_user_profile_context`는 자체 authorization을 하지 않는다. 앱 API의
+patient read는 `is_caregiver_of`를 확인하지만 profile helper를 AI에서 호출하는 것만으로 auth가
+충족되지 않는다. Trusted caller는 user scope/auth 및 read 성공을 먼저 보장해야 한다.
+
+**데이터 해석.** Stored stage/diagnosis/symptoms/interests는 저장된 배경 데이터로, reference 기준
+현재 임상 상태를 자동으로 의미하지 않는다. Latest assessment는 type별 가장 최근 기록의 **평가 당시**
+정보다. 오래된 K-MMSE/CDR을 현재 검사 결과/치매 단계로 단정하지 않는다. `ASSESSMENT_TYPES`는
+canonical identification, range/step/allowed/direction metadata 및 제한적 research relevance 보조다.
+Raw score → 진단/단계, 서로 다른 검사 점수 비교, 불명확한 검사 version normalization,
+`higher_is_worse`만으로 severity 판단을 금지한다. Unknown/legacy 값은 V1에서 계속 보존한다.
+Current medication은 저장된 `is_taking=True` rows이며 실제 복용/순응도/약효/치료 반응을 증명하지
+않는다. `is_taking=True`인데 종료일이 과거인 conflict도 수정·삭제하지 않는다.
+Safety의 positive-only subset은 전체 safety history가 아니다. 정책에 따른 complete read라 해도
+그 기간의 positive-event population에 대한 의미일 뿐이다. Row 없음과 모든 flag=false인 row를
+동일시하지 않는다. Full V1은 false row도 보존하며 selected demo mapping은 positive 목록만 받는다.
+
+**Coverage canonical policy.** Authorization/Scope → Eligibility E → Inclusion/Selection I → Payload.
+`I ⊆ E`, `total_count=|E|`, `included_count=|I|`, `is_truncated=(|I|<|E|)`다.
+Inclusion은 LIMIT뿐 아니라 latest-N/latest-per-type/token budget/representative selection을 포함할
+수 있으나 이번 작업에서 이런 production default나 ranking을 만들지 않는다.
+
+| 같은 DB history 10건 / 실제 returned latest-per-type 3건 | total | included | truncated |
+|---|---:|---:|---|
+| latest-per-type을 Eligibility E로 선언 | 3 | 3 | false |
+| history가 E이고 latest-per-type을 Inclusion I로 선언 | 10 | 3 | true |
+
+이름 자체가 어느 policy인지 결정하지 않는다. Source/Loader/Planner는 동일한 trusted static
+collection policy를 공유해야 한다. Assessment history, safety 전체/positive subset, medication history,
+visit history의 production E/I 범위는 **unresolved**이며 code default를 추가하지 않는다.
+Planner는 count 3/3에서 “현재 policy의 eligible 3건이 모두 포함됨”만 판단할 수 있다.
+DB 전체 history가 3건뿐이라고 해석하거나 aggregate에 없는 history 때문에 truncated를 추정하지
+않는다. Returned length → total fallback은 없다. Actual eligible count를 모르면 정식 V1 Coverage를
+완성했다고 선언할 수 없다. Managed patients는 기존 eligible 전체 포함 조건을 유지한다.
+
+Source read completeness는 Coverage와 별개로 auth/scope, E/filter, temporal criteria, I/limit,
+pre-inclusion count, stable ordering, logical snapshot, 모든 required sub-read 성공을 포함한다.
+이 metadata는 server-side 계약이며 final V1 field로 추가하지 않는다.
+`reference_time`은 temporal selection/validation anchor이고 `reference_date`는 그 service local date다.
+Logical snapshot은 여러 read/count가 같은 DB state를 보는 경계로 historical AS-OF timestamp가 아니다.
+T0 reference 생성 → T1 row 수정 → T2 snapshot 시작도 각 collection의 명시된 시간 eligibility와
+모순되지 않아야 한다. Validator는 DB snapshot consistency를 증명하지 않는다. Production은 전달된
+reference/reference_date를 시간 조건에 사용해야 한다. Backend helper의 독립 today/now를 그대로
+사용하는 profile demo는 이 Production 시간 계약을 충족했다고 주장하지 않는다.
+CareLog의 `[reference-720h, reference)`와 safety의 calendar-date policy는 같은 기간이 아니다.
+
+**Profile-only demo boundary.** `workflows/feed_profile_planning.py`의
+`PatientProfileSourceMappingV1(service_timezone=...)`은 trusted caller가 읽은 실제 `PatientContext`
+sequence와 이미 생성된 aware `reference_time`을 받아 `FeedProfilePlanningInputV1`을 반환한다.
+Backend dict를 Planner에 직접 넘기거나 전체 DTO dump 후 필드를 삭제하지 않는다.
+Mapper는 caregiver ownership/child ownership/ID uniqueness를 검사하고 UUID bytes 순으로
+Context-local `patient_ref`를 부여한다. Patient별 selected 목록과 원문을 각각 보존한다.
+Visit 목록을 merge하지 않으므로 dedup을 추정하지 않고 duplicate raw visit ID는 실패시킨다.
+`visit_content`는 직접 복사하며 005 필드 concat/parsing은 없다. V2 후보일 뿐 V1에 추가하지 않는다.
+
+Planning DTO는 별도 `schema_version="feed-profile-planning-1"`, aware UTC `reference_time`,
+`managed_patient_profiles` list만 가지며 strict fields/extra forbid/instance 재검증을 적용한다.
+Patient profile과 5개 selected list만 포함한다. Caregiver profile, CareLog, Summary, Coverage는
+제공되지 않는 source이므로 field 자체가 없다. Lite/V2/full V1 또는 Production Source 대용이 아니다.
+Mapper는 각 selected list가 Backend에서 명시적으로 제공되었는지도 검사하지만 DB read completeness나
+실제 auth/snapshot까지 증명하지 않는다. 오류는 고정 `FeedProfileMappingError`, partial 성공 없음.
+`PROFILE_PLANNING_AVAILABLE_SOURCES`는 immutable server-side source-scope 설정이며 payload에
+직렬화하지 않는다. Demo Planner는 이 범위를 사용하고 unavailable source를 successful absence로
+해석하지 않는다. 실제 Demo Planner/RAG/Feed 생성 및 Production Source wiring은 아직 없다.
+
+**전체 prompt/query privacy.** `FeedPromptBuilder`를 공용 `AgentLoopRunner`에 주입한다.
+FeedWorkflow는 construction과 agent 실행 직전에 이 builder를 확인하여 DefaultPromptBuilder의
+raw `AgentContext` 직렬화를 차단한다. Identity는 서버의 auth/tool/persistence 경계에서 유지하고
+Provider initial messages에는 request/user/patient ID를 직렬화하지 않는다. 공용 Runner 및 Chat의
+DefaultPromptBuilder는 변경하지 않았다. Demo에도 동일 builder를 사용해야 한다.
+Caller는 이미 검증·최소화된 planning/Context payload만 user input으로 공급해야 한다.
+전체 system/user/tool/evidence messages는 privacy 검토 대상이며 builder가 자유 텍스트·검색 근거·
+LLM output·custom system prompt를 PII sanitize하는 것은 아니다.
+
+`FeedResearchQueryPolicy`는 서버가 별도로 사전 승인한 일반화 query의 immutable allowlist를 받아
+매 search handler 실행 전에 exact membership을 검사하는 주입 경계다. Default topic/ranking/PII
+detector는 없다. Source narrative/LLM output에서 allowlist를 만들면 안 되며, identity/ref/환자
+서술이 섞인 query를 그대로 허용하지 않는다. Demo/Production 모두 guarded search seam에 binding해야
+한다. 실제 Production registry/Planner는 미연결이다. 회귀 테스트는 실제 Fake provider의 모든
+turn과 search query를 검사하며 allowlist 밖 raw identity/narrative가 handler에 도달하지 않음을 검증한다.
+Allowlist projection은 field minimization뿐이다. Symptoms/interests/note/visit_content/CareLog/Summary
+원문 속 PII sanitizer는 **미구현**이며 완전한 PII-safe 보장을 주장하지 않는다.
+
+Deleted-patient CareLog eligibility/NULL 처리와 deleted-derived Summary retention/invalidation은
+**Production 연결 전 반드시 확정할 unresolved item**이다. Complete Feed Read, count-aware history,
+single logical DB snapshot implementation, free-text privacy, Planner/guardrail/source wiring도 후속이다.
+정식 성공은 Complete Feed Read → real Coverage → consistent snapshot → CareLog/Summary → full V1 →
+FeedWorkflow이며 profile-only demo 준비를 정식 Production integration 완료로 표현하지 않는다.
 
 **AI-side Loader implementation complete**: Fake Source로 DTO/시간/identity/projection/coverage/
 오류 및 Workflow 전달·fail-fast를 검증했다. **Production Feed Context integration은 후속**이다.

@@ -201,6 +201,25 @@ class SourceContractTests(unittest.TestCase):
 
 
 class FeedContextLoaderTests(unittest.TestCase):
+    def test_declared_eligibility_vs_inclusion_counts_are_preserved(self):
+        # Same three returned latest-per-type rows, two explicitly supplied E policies.
+        for total in (3, 10):
+            data = full_snapshot()
+            selected = data["managed_patients"]["items"][1]["clinical_assessments"]
+            original = selected["items"][0]
+            selected["items"] = [{**original, "assessment_type": name} for name in ("A", "B", "C")]
+            selected["total_count"] = total
+            loader, source, _ = self.make_loader(data)
+            result = loader(CONTEXT, recent_days=30)
+            coverage = result.managed_patient_profiles.items[0].clinical_assessments.coverage
+            with self.subTest(total=total):
+                self.assertEqual(coverage.model_dump(), {
+                    "total_count": total, "included_count": 3, "is_truncated": total > 3,
+                })
+        del selected["total_count"]
+        with self.assertRaises(ValidationError):
+            s.FeedContextSourceSnapshot.model_validate(data)
+
     def make_loader(self, data=None, *, source=None, clock=None, service_timezone=SERVICE_TZ):
         source = source if source is not None else FakeFeedContextSource(data)
         clock = clock if clock is not None else Mock(return_value=NOW)
