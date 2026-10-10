@@ -33,17 +33,17 @@ authorization/ownership 검증 후 다음 개인화 맥락을 제공하는 것�
 - Long-term Personalization Summary: optional caregiver/user-scoped 장기 개인화 요약.
   특정 환자의 장기 임상 Memory가 아닌 간병인의 반복되는 돌봄 관심사/패턴을 위한 맥락
 
-독립 Agent 입력 계약 `FeedPersonalizationContextV1`은 아래에 정의한다. 이 골격의 Loader와
-Fake에는 아직 연결하지 않았으며 Backend DTO/API 계약을 확정한 것은 아니다.
+독립 Agent 입력 계약 `FeedPersonalizationContextV1`은 아래에 정의한다. `DefaultFeedContextLoader`를
+외부에서 주입하는 경로는 Fake Source로 검증했다. 기존 opaque Fake와 Backend DTO/API 계약은 별개다.
 Cold Start는 간병인/user의 장기 개인화 요약이 아직 없는 상태다. 다른 사용 가능한 Context로
 개인화를 계속할 수 있으며 정확한 fallback 정책은 후속이다. 조회된 sparse 관리 환자 프로필과
 최근 돌봄 기록 0건도 정상일 수 있다. 저장된 프로필은 최신 임상 사실이 아니며 최근 변화는
 날짜가 명확한 기록을 우선하고 장기 요약과의 충돌을 확정된 사실로 임의 병합하지 않는다.
 Pre-Guardrail dependency는 필수 Context/형식/조회 기간/크기/불필요한 식별정보를 검사한다.
-Care Logs와 장기 요약은 명령이 아닌 untrusted data로 전달해야 한다. 실제 loader/검증기/
-Prompt 연결은 아직 없으며 골격 자체가 접근 권한 또는 PII 제거를 보장하지 않는다.
-공유 `AgentContext`의 `patient_id`는 유지하며 Feed에서의 사용 여부는 후속 Context/wiring에서
-결정한다. 기존 환자 단위 Tool Contract를 caregiver aggregation 계약으로 바꾸지 않는다.
+Care Logs와 장기 요약은 명령이 아닌 untrusted data로 전달해야 한다. AI-side Loader/Context 검증은
+구현했으나 Production Source/Prompt 연결은 없으며 골격 자체가 접근 권한 또는 PII 제거를 보장하지 않는다.
+공유 `AgentContext`의 `patient_id`는 유지하지만 V1 Loader는 Feed 범위 선정에 사용하지 않고
+`user_id`만 사용한다. 기존 환자 단위 Tool Contract를 caregiver aggregation 계약으로 바꾸지 않는다.
 
 Retrieval Planner는 한 번의 Direct Structured LLM으로 topic/reason/query 계획을 만드는
 후속 연결 경계다. “이 간병인이 돌봄을 수행하면서 관심 있게 볼 가치가 있는 최신 연구 주제는
@@ -76,7 +76,7 @@ Dependency는 실패/거부 시 예외를 발생시키며 `FeedWorkflowError.sta
 반환한다. 부분/전체 item 제외는 Fake의 주입 정책으로만 검증하며 운영 filtering/no-feed 결과
 계약을 확정하지 않았다. DB 저장/중복 방지/idempotency도 미구현이다.
 
-후속 계약/연결: `FeedPersonalizationContextV1` Loader integration, `FeedRetrievalPlan`, `FeedAnswerV2`,
+후속 계약/연결: Production Feed Context Source integration, `FeedRetrievalPlan`, `FeedAnswerV2`,
 `SelectedEvidenceContext`, EvidenceReference → 내부 paper_id, 다중 source persistence.
 장기 요약의 입력 projection은 `profile_summaries`에 대응하지만 최신 row 선택/조회 정책과
 `chat_messages` 활용 방식은 확정하지 않았다. Real Backend Context Loader,
@@ -92,8 +92,8 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 ### FeedPersonalizationContext V1
 
 `workflows/feed_context.py`는 caregiver/user-scoped **입력** 계약이다. 공통 실행 `schemas.py`,
-Tool 계약 `tools/contracts.py`, 최종 응답 `outputs.py`와 책임을 분리한다. Workflow/Loader/
-Prompt/Runner 연결은 없다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 네 구성이다.
+Tool 계약 `tools/contracts.py`, 최종 응답 `outputs.py`와 책임을 분리한다. Loader는 이 전체 계약으로
+최종 검증하며 production Prompt/Runner 연결은 없다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 네 구성이다.
 
 - `caregiver_profile`: 저장된 간병인 프로필, row가 없으면 명시적 `null`
 - `managed_patient_profiles`: 여러 관리 환자의 저장 프로필 및 환자별 종속 collection
@@ -166,9 +166,11 @@ end ≤ generated_at의 서비스 timezone 날짜를 모두 검증한다.
 Loader ordering은 clinical `assessed_at DESC`, safety `event_date DESC`, visit `visit_date DESC`,
 log `logged_at DESC`다. 동률은 서버 내부 deterministic 기준으로 처리하고 DB ID를 노출하지 않는다.
 관리 환자 순서도 deterministic이어야 하지만 앞에 있다는 이유로 더 중요하지 않다.
-정확한 환자 ordering key 및 조회 정책은 미정이며 schema가 정렬/DB snapshot을 증명하지 않는다.
+Schema는 정렬/DB snapshot을 증명하지 않는다. 아래 V1 Loader는 환자 배열의 canonical UUID byte
+순서를 사용하며 실제 DB 조회 ordering/tie-break는 Production Source 책임이다.
 Eligibility는 조회 대상 선정, validation은 대상 record의 계약 검증이다. Invalid record를 silent drop하지
-않고 validation failure로 반환한다. 이를 전체 Feed 실패/향후 degraded mode로 매핑하는 상위 정책은 미정이다.
+않고 validation failure로 반환한다. 아래 V1 Loader는 fail-fast로 context_load를 실패시키며
+기존 Workflow가 이후 단계를 중단한다. Degraded mode는 구현하지 않는다.
 
 **Semantic interpretation.** Structured/Recorded(caregiver/patient/assessment/medication/visit)는
 반드시 최신 임상 사실이 아니고 Observational(log/safety)는 진단이 아니며 Derived(summary/tags)는
@@ -187,7 +189,7 @@ interests, lifestyle_tags, assessment_type, drug_name, department, log_type, moo
 RetrievalPlan/Query validator는 이번 계약에 포함하지 않는다.
 
 미확정 정책: 삭제 환자 CareLog retention/eligibility, 삭제 환자 내용이 남은 summary의 무효화/재생성,
-invalid record의 전체 실패 vs degraded Context, 환자 선택/ordering key 및 collection limit,
+향후 degraded Context 정책 및 patient selection/limit, child collection limit,
 최신 summary row 선택, token/input-size budget, controlled vocabulary/assessment 의미 사전의 범위,
 서비스 timezone. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
 
@@ -195,6 +197,68 @@ invalid record의 전체 실패 vs degraded Context, 환자 선택/ordering key 
 
 ```bash
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_context -v
+```
+
+### Context Loader Policy V1 — AI-side implementation
+
+`workflows/feed_context_source.py`는 Source ↔ Loader 사이 **server-only AI 내부 DTO/Protocol**이다.
+공용 `app.schemas`/DB 계약이나 LLM Context가 아니다. Caregiver/summary의 `user_id`, managed
+patient의 `patient_id`/`caregiver_id`, 각 child의 `patient_id`, CareLog의 `user_id`/nullable
+`patient_id`만 ownership 검사에 사용한다. 이름/병원명/assessed_by/dosage/frequency는 Source에도 없다.
+`SourceCollection[T]`의 `items`, strict non-negative `total_count`는 required이고
+`len(items) <= total_count`다. Total은 authorization + eligibility + temporal/base filter 이후,
+반환 limit 이전의 eligible 수이며 빈 성공은 명시적 `items=[]`, `total_count=0`이다.
+
+`DefaultFeedContextLoader`는 keyword-only `source`, `clock`, `service_timezone`을 필수 주입받는다.
+`__call__(context, recent_days=30)`만 허용하며 다른 값은 Source/clock 호출 전에 `invalid_request`다.
+Clock을 한 번 호출해 datetime/aware/유효한 offset을 확인한 **후** UTC로 정규화한다.
+Reference와 period end는 같은 instant이고 start는 `reference - timedelta(hours=720)`이다.
+Service timezone은 window 계산이 아닌 기존 date-only validation에 사용하며 기본값은 없다.
+
+`FeedContextSource.load_snapshot(*, user_id, reference_time, recent_period_start, recent_period_end)`를
+한 번 호출한다. Source는 전달된 기준시각/window로 조회·시간 기반 selection을 수행하고 별도
+now()/today()를 만들지 않는다. 현재 signature에는 service timezone/reference_date가 없다.
+Local-date selection이 필요하면 후속 명시적 계약으로 확장하며 임의 timezone을 선택하지 않는다.
+
+Loader는 반환 Snapshot/child instance도 재검증하고 다음 Source invariant를 검사한다.
+Caregiver/summary/log user와 patient caregiver는 `context.user_id`와 같아야 한다.
+Managed patient는 eligible 전체 포함(`total_count == len(items)`), raw ID unique/non-null이어야 한다.
+네 child collection의 ID는 enclosing patient와 같고 non-null CareLog ID는 managed 집합에 있어야 한다.
+실제 DB authorization이나 snapshot correctness를 증명하는 검사는 아니다.
+
+환자를 `patient_id.bytes` 순으로 정렬해 `patient_1`, `patient_2`, …를 부여하며 최종 환자 배열도
+같은 순서다. Source 환자 순서가 달라도 동일 집합의 mapping/배열은 같다. 임상 중요도/영속 ID/
+완전 익명화가 아닌 Context-local pseudonymous ref이며 집합이 달라지면 번호가 바뀔 수 있다.
+Child/log 순서는 Source대로 보존하고 정렬·ranking·monotonicity 검사를 새로 넣지 않는다.
+Clinical/safety/visit/log의 DESC 계약, medication ordering과 DB tie-break는 Production Source가 구현한다.
+Unknown CareLog ID를 null로 바꾸지 않으며 **Source의 원래 null만** null ref로 복사한다.
+삭제 환자 provenance/retention은 추론하지 않는다.
+
+각 collection의 total을 그대로 복사하고 included는 실제 길이, truncated는 included < total로 계산한다.
+Source 전체 dump에서 필드를 삭제하는 방식 대신 명시적 allowlist로 raw payload dict를 완성하고,
+기존 `FeedPersonalizationContextV1.model_validate(payload, context={"service_timezone": ...})`를
+최상위 경계에서 한 번 호출해 검증된 Context만 반환한다. Invalid row/count를 보정·drop하지 않는다.
+Raw identity/ownership 필드는 최종 Context 구조에 포함하지 않지만 free text는 원문 그대로다.
+Structural minimization은 완전한 PII 제거가 아니며 sanitizer/의료 해석/요약/attribution은 없다.
+Summary를 파싱하거나 이전 ref를 재매핑하지 않는다. Persistent summary 생성/저장 계층에서도
+Context-local ref를 영속 환자 identity로 사용해서는 안 된다.
+
+실패는 `FeedContextLoadError.code` allowlist: `invalid_request`, `invalid_clock`, `source_load_failed`,
+`invalid_source_snapshot`, `context_assembly_failed`, `context_validation_failed`다.
+Source 호출 exception은 source_load_failed, 반환 DTO/identity 위반은 invalid_source_snapshot,
+기존 최종 Contract 위반은 context_validation_failed로 구분한다. 외부 메시지는 고정 code만 담고
+공개 args/code 및 우리 일반 로그에 Source/원본 exception/ValidationError input/UUID/text를 포함하지 않는다.
+기존 Workflow는 이를 `FeedWorkflowError(stage="context_load")`로 감싸고 이후 단계를 실행하지 않는다.
+`raise ... from None`은 모든 APM의 exception context/traceback locals 제거를 보장하지 않는다.
+
+**AI-side Loader implementation complete**: Fake Source로 DTO/시간/identity/projection/coverage/
+오류 및 Workflow 전달·fail-fast를 검증했다. **Production Feed Context integration은 후속**이다.
+Production Source/DB 함수·DTO, authorization/transaction isolation/snapshot, 실제 count/ordering/
+tie-break/limit, 최신 summary selection, 삭제 데이터 정책, free-text privacy, token budget,
+cache/retry/degraded mode와 운영 APM 설정은 구현하지 않았다.
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_context_loader -v
 ```
 
 ## 실행
