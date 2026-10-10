@@ -41,7 +41,8 @@ def run_feed_agent_loop(runner: AgentLoopRunner, context: AgentContext,
     raise NotImplementedError("FeedAnswerV2 execution is not connected")
 
 
-def _validate_feed_runner(runner: AgentLoopRunner) -> None:
+def validate_feed_runner(runner: AgentLoopRunner) -> None:
+    """Shared Feed-only contract; validate at construction and before execution."""
     if not isinstance(runner.prompt_builder, FeedPromptBuilder):
         raise ValueError("Feed runner requires FeedPromptBuilder")
     names = [definition["function"]["name"] for definition in runner.registry.definitions()]
@@ -68,7 +69,7 @@ class FeedWorkflow:
                  source_resolver: Callable[[AgentContext, object, object], object],
                  feed_repository: Callable[[AgentContext, object], object],
                  agent_stage: FeedAgentStage = run_feed_agent_loop):
-        _validate_feed_runner(agent_loop_runner)
+        validate_feed_runner(agent_loop_runner)
         self.agent_loop_runner = agent_loop_runner
         self.context_loader = context_loader
         self.pre_guardrail = pre_guardrail
@@ -104,5 +105,5 @@ class FeedWorkflow:
 
     def _run_agent(self, context: AgentContext, personalization: object, plan: object) -> object:
         # 외부 조립 후 mutable Runner의 configuration이 바뀐 경우에도 실행하지 않는다.
-        _validate_feed_runner(self.agent_loop_runner)
+        validate_feed_runner(self.agent_loop_runner)
         return self.agent_stage(self.agent_loop_runner, context, personalization, plan)
