@@ -437,7 +437,7 @@ Medication stable ordering, aggregate와 Source 구분, empty와 read failure �
 | 계층 | 책임 |
 |---|---|
 | `FeedPersonalizationContextV1` | AI가 받을 수 있는 구조·데이터 의미·무결성 |
-| `PatientProfileSourceMappingV1` | Backend DTO의 explicit allowlist projection 및 server-only ownership/identity 경계 |
+| `FeedUserProfileSourceMappingV1` | Backend UserProfileContext의 scope consistency/명시 필드 검사, caregiver allowlist, patient projection 및 Demo 입력 조립 |
 | Feed Context Loader Policy | scope, eligibility E, inclusion I, count, 시간, snapshot, fail-fast |
 | Feed Retrieval Plan | 일반화 연구 주제/query, ranking, recency/relevance/diversity (실제 Planner는 후속) |
 
@@ -503,24 +503,52 @@ reference/reference_date를 시간 조건에 사용해야 한다. Backend helper
 사용하는 profile demo는 이 Production 시간 계약을 충족했다고 주장하지 않는다.
 CareLog의 `[reference-720h, reference)`와 safety의 calendar-date policy는 같은 기간이 아니다.
 
-**Profile-only demo boundary.** `workflows/feed_profile_planning.py`의
-`PatientProfileSourceMappingV1(service_timezone=...)`은 trusted caller가 읽은 실제 `PatientContext`
-sequence와 이미 생성된 aware `reference_time`을 받아 `FeedProfilePlanningInputV1`을 반환한다.
-Backend dict를 Planner에 직접 넘기거나 전체 DTO dump 후 필드를 삭제하지 않는다.
-Mapper는 caregiver ownership/child ownership/ID uniqueness를 검사하고 UUID bytes 순으로
-Context-local `patient_ref`를 부여한다. Patient별 selected 목록과 원문을 각각 보존한다.
-Visit 목록을 merge하지 않으므로 dedup을 추정하지 않고 duplicate raw visit ID는 실패시킨다.
-`visit_content`는 직접 복사하며 005 필드 concat/parsing은 없다. V2 후보일 뿐 V1에 추가하지 않는다.
+**User profile demo boundary.** `workflows/feed_profile_planning.py`의
+`FeedUserProfileSourceMappingV1(service_timezone=...)`은 trusted caller가 읽은 실제
+`UserProfileContext`와 caller가 명시한 aware `reference_time`을 받아 `FeedProfilePlanningInputV1`을
+반환한다. Demo 경로는 `UserProfileContext → FeedUserProfileSourceMappingV1 → FeedProfilePlanningInputV1`
+에서 멈춘다. Production 경로 `FeedContextSourceSnapshot → DefaultFeedContextLoader → FeedPersonalizationContextV1`은
+별개이며 변경하지 않는다. 두 경로는 최소화/provenance 의미를 공유하지만 Demo DTO는 Production Context가 아니다.
 
-Planning DTO는 별도 `schema_version="feed-profile-planning-1"`, aware UTC `reference_time`,
-`managed_patient_profiles` list만 가지며 strict fields/extra forbid/instance 재검증을 적용한다.
-Patient profile과 5개 selected list만 포함한다. Caregiver profile, CareLog, Summary, Coverage는
-제공되지 않는 source이므로 field 자체가 없다. Lite/V2/full V1 또는 Production Source 대용이 아니다.
-Mapper는 각 selected list가 Backend에서 명시적으로 제공되었는지도 검사하지만 DB read completeness나
-실제 auth/snapshot까지 증명하지 않는다. 오류는 고정 `FeedProfileMappingError`, partial 성공 없음.
-`PROFILE_PLANNING_AVAILABLE_SOURCES`는 immutable server-side source-scope 설정이며 payload에
-직렬화하지 않는다. Demo Planner는 이 범위를 사용하고 unavailable source를 successful absence로
+검증 순서는 reference/timezone → UserProfileContext 타입/명시 필드 → top-level user scope →
+caregiver scope/allowlist → patient projection → 전체 Planning validation이다.
+`profile.user_id == AgentContext.user_id`, caregiver profile의 `user_id`, 각 환자의 `caregiver_id`와
+child `patient_id`를 검사하는 것은 **identity/scope consistency**이며 Backend authorization을 대체하지 않는다.
+Trusted caller가 auth/read 성공을 보장해야 한다. `AgentContext.patient_id`는 환자 필터에 사용하지
+않아 모든 managed patient가 보존된다. 실제 Feed entrypoint의 patient_id 공급은 후속 integration issue이며
+임의 UUID/dummy patient_id를 도입하지 않는다.
+
+Backend의 기본값과 실제 입력을 구분하기 위해 `caregiver_profile`, `patients`가 `model_fields_set`에
+명시되어 있어야 한다. Explicit `caregiver_profile=None`은 성공한 read에서 저장된 profile 없음,
+explicit `patients=[]`는 관리 환자 없음이다. 필드 누락은 Mapping failure다. 각 PatientContext의
+5개 selected list 명시 검사도 유지한다. 이는 Pydantic field omission 탐지이며 DB read 성공·completeness나
+auth/snapshot의 증명이 아니다. 한 caregiver/patient/child라도 invalid하면 고정 `FeedProfileMappingError`로
+전체 실패하며 retry, partial result, silent row drop은 없다.
+
+Caregiver는 기존 `CaregiverProfileContext`를 재사용하고 `relationship`, `burden_score`, `mood_score`,
+`lifestyle_tags`, `updated_at`만 allowlist로 복사한다. Raw recorded scores에서 부담 등급/진단을 추론하지
+않는다. User name/UUID는 제외하며 caregiver signal은 각 patient signal과 분리한다.
+기존 PatientProfileSourceMappingV1의 public API는 내부 `_project_managed_patient_profiles`로 분리했다.
+Patient projection은 scope/child ownership/ID uniqueness를 검사하고 UUID bytes 순으로 Context-local
+`patient_ref`를 부여한다. 환자별 selected 목록과 원문을 보존하고 synthetic patient로 합치지 않는다.
+Visit 목록을 merge하거나 dedup을 추정하지 않으며 duplicate raw visit ID는 실패시킨다.
+`visit_content`는 직접 복사하며 005 필드 concat/parsing은 없다. Backend dict 전체 dump 후 삭제 방식은 사용하지 않는다.
+
+Planning DTO는 기존 `schema_version="feed-profile-planning-1"`, aware UTC `reference_time`,
+**required nullable** `caregiver_profile`, `managed_patient_profiles` list를 갖는다.
+Strict fields/extra forbid/instance 재검증을 유지한다. CareLog, Summary, Coverage는 field 자체가 없으며
+Lite/V2/full V1 또는 Production Source 대용이 아니다. `generated_at`은 Backend aggregate 생성 시각이고
+planning reference로 복사하지 않는다. `reference_time`은 DB AS-OF timestamp가 아니므로 caregiver/patient
+`updated_at > reference_time`만으로 거부하지 않는다. 기존 assessment/safety/visit temporal validation은 유지한다.
+Backend today와 AI reference의 자정 경계 불일치는 날짜 보정/row 삭제 없이 fail-fast하며 supplied reference_date를
+Backend read까지 전달하는 Production 시간 계약은 후속이다.
+
+`PROFILE_PLANNING_AVAILABLE_SOURCES`는 기존 sources에 `caregiver_profile`을 추가한 immutable
+server-side 설정이며 payload에 직렬화하지 않는다. Demo Planner는 unavailable source를 successful absence로
 해석하지 않는다. 실제 Demo Planner/RAG/Feed 생성 및 Production Source wiring은 아직 없다.
+이 Mapping은 합성/개발용 Demo 경계다. Relationship/lifestyle_tags/symptoms/interests/note/visit_content의
+free-text PII를 sanitize하지 않으며 실환자 데이터를 외부 LLM Provider에 전송할 수 있다는 승인으로 보지 않는다.
+다음 독립 단계는 `FeedRetrievalPlanV1`이며 query generation/RAG/Agent/recommendations 연결은 구현하지 않았다.
 
 **전체 prompt/query privacy.** `FeedPromptBuilder`를 공용 `AgentLoopRunner`에 주입한다.
 FeedWorkflow는 construction과 agent 실행 직전에 이 builder를 확인하여 DefaultPromptBuilder의

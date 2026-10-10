@@ -1,6 +1,6 @@
-"""PatientProfileSourceMappingV1 and profile-only demo planning boundary.
+"""UserProfileContext to minimized caregiver/patient demo planning input.
 
-Consumes actual Backend PatientContext DTOs after a trusted authorized read.
+Consumes Backend DTOs after a trusted read; scope consistency is not authorization.
 No DB calls, counts, Source Snapshot, CareLog/Summary placeholders or full V1
 claims. Backend selected lists are preserved separately, not promoted to history.
 """
@@ -11,17 +11,17 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, ConfigDict, Field, StrictStr, ValidationInfo, model_validator
 
-from app.user_schemas import MedicalVisitOut, PatientContext
+from app.user_schemas import CaregiverProfileOut, MedicalVisitOut, PatientContext, UserProfileContext
 
 from ..schemas import AgentContext, AgentModel
 from .feed_context import (
-    ClinicalAssessmentContext, MedicationContext, MedicalVisitContext, SafetyEventContext,
+    CaregiverProfileContext, ClinicalAssessmentContext, MedicationContext, MedicalVisitContext, SafetyEventContext,
 )
 
 
 # Trusted server configuration for this mapper; never serialized as patient data.
 PROFILE_PLANNING_AVAILABLE_SOURCES = frozenset({
-    "stored_patient_profile", "latest_assessments", "current_medications",
+    "caregiver_profile", "stored_patient_profile", "latest_assessments", "current_medications",
     "recent_safety_events", "recent_visits", "upcoming_visits",
 })
 
@@ -56,6 +56,7 @@ class FeedProfilePlanningInputV1(AgentModel):
 
     schema_version: Literal["feed-profile-planning-1"]
     reference_time: AwareDatetime
+    caregiver_profile: CaregiverProfileContext | None
     managed_patient_profiles: list[FeedPatientPlanningProfile]
 
     @model_validator(mode="after")
@@ -102,20 +103,77 @@ def _visit_payload(row: MedicalVisitOut) -> dict[str, object]:
             "department": row.department, "visit_content": row.visit_content}
 
 
-class PatientProfileSourceMappingV1:
-    """Map authorized Backend patient DTOs to minimized demo planning data.
+def _project_managed_patient_profiles(
+    context: AgentContext, profiles: Sequence[PatientContext],
+) -> list[FeedPatientPlanningProfile]:
+    """Reuse patient/child scope checks and allowlists; never assemble user input.
 
-    Structural ownership checks do not implement DB authorization. Caller must
-    fail missing/denied/partial reads before calling, and supply every selected
-    collection explicitly (Backend DTO defaults are not read-success evidence).
-    Future complete Source uses the same field allowlist, with real E/I counts.
-    No eligibility/history default or fresh now()/today() is invented here.
+    Selected fields must be explicit. Keep UUID-byte ordering, per-patient
+    provenance and all rows; final planning validation owns temporal semantics.
+    AgentContext.patient_id does not filter this caregiver-scoped collection.
+    """
+    ids = set()
+    selected = {"latest_assessments", "current_medications", "recent_safety_events",
+                "recent_visits", "upcoming_visits"}
+    for item in profiles:
+        if not isinstance(item, PatientContext) or not {"patient", *selected} <= item.model_fields_set:
+            raise ValueError("Explicit Backend patient read required")
+        patient = item.patient
+        if (not isinstance(patient.id, UUID) or patient.id in ids
+                or patient.caregiver_id != context.user_id):
+            raise ValueError("Invalid patient ownership/identity")
+        ids.add(patient.id)
+        visit_ids = set()
+        for field in selected:
+            row_ids = set()
+            for row in getattr(item, field):
+                if row.patient_id != patient.id or not isinstance(row.id, UUID) or row.id in row_ids:
+                    raise ValueError("Invalid child ownership/identity")
+                row_ids.add(row.id)
+                if field in ("recent_visits", "upcoming_visits"):
+                    if row.id in visit_ids:
+                        raise ValueError("Duplicate visit across selected lists")
+                    visit_ids.add(row.id)
+    payload = []
+    for index, item in enumerate(sorted(profiles, key=lambda row: row.patient.id.bytes), start=1):
+        patient = item.patient
+        payload.append({
+            "patient_ref": f"patient_{index}", "dementia_stage": patient.dementia_stage,
+            "diagnosis_date": patient.diagnosis_date, "symptoms": patient.symptoms,
+            "interests": patient.interests, "updated_at": patient.updated_at,
+            "latest_assessments": [{
+                "assessment_type": row.assessment_type,
+                "score": None if row.score is None else Decimal(str(row.score)),
+                "result_detail": row.result_detail, "assessed_at": row.assessed_at,
+            } for row in item.latest_assessments],
+            "current_medications": [{
+                "drug_name": row.drug_name, "is_taking": row.is_taking,
+                "start_date": row.start_date, "end_date": row.end_date, "note": row.note,
+            } for row in item.current_medications],
+            "recent_safety_events": [{
+                "event_date": row.event_date, "has_fall": row.has_fall,
+                "has_wandering": row.has_wandering, "has_missing": row.has_missing, "note": row.note,
+            } for row in item.recent_safety_events],
+            "recent_visits": [_visit_payload(row) for row in item.recent_visits],
+            "upcoming_visits": [_visit_payload(row) for row in item.upcoming_visits],
+        })
+    return [FeedPatientPlanningProfile.model_validate(item) for item in payload]
+
+
+class FeedUserProfileSourceMappingV1:
+    """Assemble demo input from an explicit Backend UserProfileContext.
+
+    Identity/scope consistency and field omission checks are not authorization
+    or evidence of DB read completeness. Trusted caller owns auth/read success.
+    reference_time is caller-supplied, not generated_at or a DB AS-OF timestamp.
+    Raw identity is minimized, but free text is not sanitized for external LLMs.
+    No production Source, fresh clock, retry or partial-success fallback.
     """
 
     def __init__(self, *, service_timezone: tzinfo):
         self.service_timezone = service_timezone
 
-    def __call__(self, context: AgentContext, profiles: Sequence[PatientContext], *,
+    def __call__(self, context: AgentContext, profile: UserProfileContext, *,
                  reference_time: datetime) -> FeedProfilePlanningInputV1:
         try:
             if (not isinstance(reference_time, datetime) or reference_time.tzinfo is None
@@ -126,54 +184,29 @@ class PatientProfileSourceMappingV1:
             reference = reference_time.astimezone(timezone.utc)
             # Reject bad timezone before reading/projecting supplied rows.
             reference.astimezone(self.service_timezone).date()
-            ids = set()
-            selected = {"latest_assessments", "current_medications", "recent_safety_events",
-                        "recent_visits", "upcoming_visits"}
-            for item in profiles:
-                if not isinstance(item, PatientContext) or not {"patient", *selected} <= item.model_fields_set:
-                    raise ValueError("Explicit Backend patient read required")
-                patient = item.patient
-                if (not isinstance(patient.id, UUID) or patient.id in ids
-                        or patient.caregiver_id != context.user_id):
-                    raise ValueError("Invalid patient ownership/identity")
-                ids.add(patient.id)
-                visit_ids = set()
-                for field in selected:
-                    row_ids = set()
-                    for row in getattr(item, field):
-                        if row.patient_id != patient.id or not isinstance(row.id, UUID) or row.id in row_ids:
-                            raise ValueError("Invalid child ownership/identity")
-                        row_ids.add(row.id)
-                        if field in ("recent_visits", "upcoming_visits"):
-                            if row.id in visit_ids:
-                                raise ValueError("Duplicate visit across selected lists")
-                            visit_ids.add(row.id)
-            payload = []
-            for index, item in enumerate(sorted(profiles, key=lambda row: row.patient.id.bytes), start=1):
-                patient = item.patient
-                payload.append({
-                    "patient_ref": f"patient_{index}", "dementia_stage": patient.dementia_stage,
-                    "diagnosis_date": patient.diagnosis_date, "symptoms": patient.symptoms,
-                    "interests": patient.interests, "updated_at": patient.updated_at,
-                    "latest_assessments": [{
-                        "assessment_type": row.assessment_type,
-                        "score": None if row.score is None else Decimal(str(row.score)),
-                        "result_detail": row.result_detail, "assessed_at": row.assessed_at,
-                    } for row in item.latest_assessments],
-                    "current_medications": [{
-                        "drug_name": row.drug_name, "is_taking": row.is_taking,
-                        "start_date": row.start_date, "end_date": row.end_date, "note": row.note,
-                    } for row in item.current_medications],
-                    "recent_safety_events": [{
-                        "event_date": row.event_date, "has_fall": row.has_fall,
-                        "has_wandering": row.has_wandering, "has_missing": row.has_missing, "note": row.note,
-                    } for row in item.recent_safety_events],
-                    "recent_visits": [_visit_payload(row) for row in item.recent_visits],
-                    "upcoming_visits": [_visit_payload(row) for row in item.upcoming_visits],
+            if (not isinstance(profile, UserProfileContext)
+                    or not {"caregiver_profile", "patients"} <= profile.model_fields_set):
+                raise ValueError("Explicit Backend user profile fields required")
+            if profile.user_id != context.user_id:
+                raise ValueError("Invalid user scope")
+            caregiver = profile.caregiver_profile
+            caregiver_payload = None
+            if caregiver is not None:
+                if (not isinstance(caregiver, CaregiverProfileOut)
+                        or caregiver.user_id != profile.user_id):
+                    raise ValueError("Invalid caregiver scope")
+                caregiver_payload = CaregiverProfileContext.model_validate({
+                    "relationship": caregiver.relationship,
+                    "burden_score": caregiver.burden_score,
+                    "mood_score": caregiver.mood_score,
+                    "lifestyle_tags": caregiver.lifestyle_tags,
+                    "updated_at": caregiver.updated_at,
                 })
+            patients = _project_managed_patient_profiles(context, profile.patients)
             return FeedProfilePlanningInputV1.model_validate({
                 "schema_version": "feed-profile-planning-1", "reference_time": reference,
-                "managed_patient_profiles": payload,
+                "caregiver_profile": caregiver_payload,
+                "managed_patient_profiles": patients,
             }, context={"service_timezone": self.service_timezone})
         except Exception:
             raise FeedProfileMappingError() from None

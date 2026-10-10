@@ -9,11 +9,14 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from app.user_schemas import APP_TIMEZONE, PatientContext, PROFILE_RECENT_VISITS, PROFILE_SAFETY_DAYS
+from app.user_schemas import (
+    APP_TIMEZONE, CaregiverProfileOut, PatientContext, UserProfileContext,
+    PROFILE_RECENT_VISITS, PROFILE_SAFETY_DAYS,
+)
 from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.feed_profile_planning import (
     FeedPatientPlanningProfile, FeedProfileMappingError, FeedProfilePlanningInputV1,
-    PatientProfileSourceMappingV1, PROFILE_PLANNING_AVAILABLE_SOURCES,
+    FeedUserProfileSourceMappingV1, PROFILE_PLANNING_AVAILABLE_SOURCES,
 )
 
 
@@ -54,12 +57,30 @@ def backend_patient(identifier=P1):
     })
 
 
+def backend_caregiver():
+    return CaregiverProfileOut(
+        user_id=USER, relationship="stored relationship", burden_score=24, mood_score=6,
+        lifestyle_tags=["stored caregiver tag"], updated_at=NOW,
+    )
+
+
+def backend_profile(rows=None, *, caregiver=None):
+    return UserProfileContext(
+        user_id=USER, name="PRIVATE_CAREGIVER_NAME", caregiver_profile=caregiver,
+        patients=[backend_patient()] if rows is None else rows, generated_at=NOW,
+    )
+
+
 class ProfileMappingTests(unittest.TestCase):
     def setUp(self):
-        self.mapper = PatientProfileSourceMappingV1(service_timezone=APP_TIMEZONE)
+        self.mapper = FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)
 
     def map(self, rows=None):
-        return self.mapper(CONTEXT, [backend_patient()] if rows is None else rows, reference_time=NOW)
+        profile = backend_profile()
+        if rows is not None:
+            # Preserve malformed/mutated row inputs for fail-fast regression tests.
+            profile.patients = rows
+        return self.mapper(CONTEXT, profile, reference_time=NOW)
 
     def test_real_backend_dto_allowlist_and_direct_visit_content(self):
         result = self.map()
@@ -89,13 +110,16 @@ class ProfileMappingTests(unittest.TestCase):
 
     def test_unavailable_sources_are_not_empty_or_null_fields(self):
         result = self.map()
-        self.assertEqual(set(type(result).model_fields), {"schema_version", "reference_time", "managed_patient_profiles"})
+        self.assertEqual(set(type(result).model_fields), {
+            "schema_version", "reference_time", "caregiver_profile", "managed_patient_profiles",
+        })
         self.assertNotIn("care_logs", result.model_dump_json())
         self.assertNotIn("long_term_summary", result.model_dump_json())
         self.assertNotIn("coverage", result.model_dump_json())
         self.assertNotIn("available_source_scope", result.model_dump_json())
         self.assertNotIn("care_logs", PROFILE_PLANNING_AVAILABLE_SOURCES)
         self.assertNotIn("long_term_summary", PROFILE_PLANNING_AVAILABLE_SOURCES)
+        self.assertIn("caregiver_profile", PROFILE_PLANNING_AVAILABLE_SOURCES)
 
     def test_empty_selected_lists_require_explicit_backend_fields(self):
         sparse = PatientContext(patient=backend_patient().patient)
@@ -155,14 +179,14 @@ class ProfileMappingTests(unittest.TestCase):
             FeedProfilePlanningInputV1.model_validate(data, context={"service_timezone": APP_TIMEZONE})
 
     def test_aware_utc_reference_and_service_date_without_new_clock(self):
-        result = self.mapper(CONTEXT, [backend_patient()], reference_time=NOW.astimezone(APP_TIMEZONE))
+        result = self.mapper(CONTEXT, backend_profile(), reference_time=NOW.astimezone(APP_TIMEZONE))
         self.assertEqual(result.reference_time, NOW)
         self.assertIs(result.reference_time.tzinfo, timezone.utc)
         for instant in (NOW.replace(tzinfo=None), TODAY, None):
             with self.assertRaises(FeedProfileMappingError):
-                self.mapper(CONTEXT, [backend_patient()], reference_time=instant)
+                self.mapper(CONTEXT, backend_profile(), reference_time=instant)
         with self.assertRaises(FeedProfileMappingError):
-            PatientProfileSourceMappingV1(service_timezone=None)(CONTEXT, [backend_patient()], reference_time=NOW)
+            FeedUserProfileSourceMappingV1(service_timezone=None)(CONTEXT, backend_profile(), reference_time=NOW)
 
     def test_backend_selected_aggregate_rules_with_mocked_reads(self):
         # Execute actual selection code, mocking all DB helpers; no SQL executes.
@@ -185,3 +209,157 @@ class ProfileMappingTests(unittest.TestCase):
         self.assertEqual(visits.call_args_list[0].kwargs, {"is_visited": False, "start_date": TODAY})
         self.assertEqual(visits.call_args_list[1].kwargs, {"is_visited": True, "limit": PROFILE_RECENT_VISITS})
         self.assertEqual(self.map([actual]).managed_patient_profiles[0].latest_assessments[0].assessed_at, date(2020, 1, 1))
+
+
+class UserProfileMappingTests(unittest.TestCase):
+    def setUp(self):
+        self.mapper = FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)
+
+    def test_caregiver_allowlist_raw_scores_and_separate_patient_provenance(self):
+        second = backend_patient(P2)
+        second.patient.symptoms = ["second patient signal"]
+        profile = backend_profile([second, backend_patient()], caregiver=backend_caregiver())
+        result = self.mapper(CONTEXT, profile, reference_time=NOW)
+        self.assertEqual(result.caregiver_profile.model_dump(), {
+            "relationship": "stored relationship", "burden_score": 24, "mood_score": 6,
+            "lifestyle_tags": ["stored caregiver tag"], "updated_at": NOW,
+        })
+        patients = result.managed_patient_profiles
+        self.assertEqual([p.symptoms for p in patients], [["stored symptom"], ["second patient signal"]])
+        for patient in patients:
+            self.assertNotIn("burden_score", patient.model_dump())
+            self.assertNotIn("mood_score", patient.model_dump())
+        self.assertNotIn("symptoms", result.caregiver_profile.model_dump())
+        text = result.model_dump_json()
+        for value in (str(USER), str(P1), str(P2), str(OTHER), CONTEXT.request_id,
+                      "PRIVATE_CAREGIVER_NAME", "PRIVATE_PATIENT_NAME", "PRIVATE_ASSESSOR",
+                      "PRIVATE_DOSAGE", "PRIVATE_FREQUENCY", "PRIVATE_HOSPITAL", "PRIVATE_005_DETAIL"):
+            self.assertNotIn(value, text)
+        for field in ("user_id", "patient_id", "caregiver_id", "name", "created_at", "generated_at"):
+            self.assertNotIn('"' + field + '"', text)
+
+    def test_explicit_null_caregiver_and_empty_patients_are_successful_absence(self):
+        profile = backend_profile([], caregiver=None)
+        self.assertTrue({"caregiver_profile", "patients"} <= profile.model_fields_set)
+        result = self.mapper(CONTEXT, profile, reference_time=NOW)
+        self.assertIsNone(result.caregiver_profile)
+        self.assertEqual(result.managed_patient_profiles, [])
+        self.assertIn("caregiver_profile", result.model_dump())
+
+    def test_top_level_defaulted_fields_are_not_explicit_reads(self):
+        for omitted in ("caregiver_profile", "patients"):
+            data = backend_profile([]).model_dump()
+            del data[omitted]
+            profile = UserProfileContext.model_validate(data)
+            self.assertNotIn(omitted, profile.model_fields_set)
+            with self.subTest(omitted=omitted), self.assertRaises(FeedProfileMappingError):
+                self.mapper(CONTEXT, profile, reference_time=NOW)
+
+    def test_planning_caregiver_field_is_required_nullable_and_revalidated(self):
+        data = self.mapper(CONTEXT, backend_profile([]), reference_time=NOW).model_dump()
+        missing = dict(data)
+        del missing["caregiver_profile"]
+        with self.assertRaises(ValidationError):
+            FeedProfilePlanningInputV1.model_validate(missing, context={"service_timezone": APP_TIMEZONE})
+        result = FeedProfilePlanningInputV1.model_validate(data, context={"service_timezone": APP_TIMEZONE})
+        self.assertIsNone(result.caregiver_profile)
+        result = self.mapper(CONTEXT, backend_profile([], caregiver=backend_caregiver()), reference_time=NOW)
+        result.caregiver_profile.burden_score = "24"
+        with self.assertRaises(ValidationError):
+            FeedProfilePlanningInputV1.model_validate(result, context={"service_timezone": APP_TIMEZONE})
+
+    def test_user_and_caregiver_scope_mismatch_fail_without_identity_leak(self):
+        for field in ("user", "caregiver"):
+            profile = backend_profile(caregiver=backend_caregiver())
+            if field == "user":
+                profile.user_id = OTHER
+            else:
+                profile.caregiver_profile.user_id = OTHER
+            with self.subTest(field=field), self.assertRaises(FeedProfileMappingError) as caught:
+                self.mapper(CONTEXT, profile, reference_time=NOW)
+            self.assertEqual(str(caught.exception), "Feed profile mapping failed")
+            public = "".join(traceback.format_exception(caught.exception))
+            for value in (str(USER), str(OTHER), "PRIVATE_CAREGIVER_NAME", "PRIVATE_PATIENT_NAME"):
+                self.assertNotIn(value, public)
+
+    def test_caregiver_invalid_values_fail_entire_mapping(self):
+        for field, value in (("burden_score", True), ("mood_score", "6"),
+                             ("relationship", 123), ("lifestyle_tags", [1]),
+                             ("updated_at", NOW.replace(tzinfo=None))):
+            profile = backend_profile(caregiver=backend_caregiver())
+            setattr(profile.caregiver_profile, field, value)
+            with self.subTest(field=field), self.assertRaises(FeedProfileMappingError):
+                self.mapper(CONTEXT, profile, reference_time=NOW)
+
+    def test_backend_profile_and_caregiver_dicts_are_not_trusted_dtos(self):
+        profile = backend_profile(caregiver=backend_caregiver())
+        malformed = profile.model_copy(update={"caregiver_profile": profile.caregiver_profile.model_dump()})
+        for value in (None, profile.model_dump(), [backend_patient()], malformed):
+            with self.subTest(kind=type(value).__name__), self.assertRaises(FeedProfileMappingError):
+                self.mapper(CONTEXT, value, reference_time=NOW)
+
+    def test_no_partial_result_when_one_of_multiple_patients_is_invalid(self):
+        first, second = backend_patient(P1), backend_patient(P2)
+        second.recent_visits[0].patient_id = P1
+        profile = backend_profile([first, second], caregiver=backend_caregiver())
+        with self.assertRaises(FeedProfileMappingError):
+            self.mapper(CONTEXT, profile, reference_time=NOW)
+
+    def test_patient_order_and_context_patient_id_do_not_change_user_input(self):
+        expected = None
+        for rows in ([backend_patient(P1), backend_patient(P2)], [backend_patient(P2), backend_patient(P1)]):
+            for patient_id in (P1, P2, OTHER):
+                context = CONTEXT.model_copy(update={"patient_id": patient_id})
+                result = self.mapper(context, backend_profile(rows, caregiver=backend_caregiver()), reference_time=NOW)
+                self.assertEqual(len(result.managed_patient_profiles), 2)
+                if expected is None:
+                    expected = result
+                self.assertEqual(result, expected)
+
+    def test_generated_at_is_not_reference_time_and_updated_profiles_are_not_as_of(self):
+        profile = backend_profile(caregiver=backend_caregiver())
+        profile.generated_at = NOW + timedelta(days=5)
+        profile.caregiver_profile.updated_at = NOW + timedelta(days=1)
+        profile.patients[0].patient.updated_at = NOW + timedelta(days=1)
+        result = self.mapper(CONTEXT, profile, reference_time=NOW.astimezone(APP_TIMEZONE))
+        self.assertEqual(result.reference_time, NOW)
+        self.assertIs(result.reference_time.tzinfo, timezone.utc)
+        self.assertEqual(result.caregiver_profile.updated_at, profile.caregiver_profile.updated_at)
+        self.assertEqual(result.managed_patient_profiles[0].updated_at, profile.patients[0].patient.updated_at)
+        with self.assertRaises(TypeError):
+            self.mapper(CONTEXT, profile)
+
+    def test_midnight_selected_signal_mismatch_fails_without_correction_or_dropping(self):
+        # Backend selected Oct 10 rows while the supplied AI anchor is Oct 9 KST.
+        earlier = NOW - timedelta(hours=2)
+        self.assertEqual(earlier.astimezone(APP_TIMEZONE).date(), TODAY - timedelta(days=1))
+        for field in ("latest_assessments", "recent_safety_events", "recent_visits"):
+            source = backend_patient()
+            source.latest_assessments[0].assessed_at = TODAY
+            patient = PatientContext(patient=source.patient, latest_assessments=[], current_medications=[],
+                                     recent_safety_events=[], recent_visits=[], upcoming_visits=[])
+            patient.patient.diagnosis_date = None
+            setattr(patient, field, getattr(source, field))
+            profile = backend_profile([patient], caregiver=backend_caregiver())
+            before = profile.model_dump()
+            with self.subTest(field=field), self.assertRaises(FeedProfileMappingError):
+                self.mapper(CONTEXT, profile, reference_time=earlier)
+            self.assertEqual(profile.model_dump(), before)
+        # Backend's older today can also return an appointment before AI today.
+        patient = backend_patient()
+        patient.upcoming_visits[0].visit_date = TODAY - timedelta(days=1)
+        profile = backend_profile([patient])
+        before = profile.model_dump()
+        with self.assertRaises(FeedProfileMappingError):
+            self.mapper(CONTEXT, profile, reference_time=NOW)
+        self.assertEqual(profile.model_dump(), before)
+
+    def test_free_text_is_preserved_without_claiming_pii_sanitization(self):
+        profile = backend_profile(caregiver=backend_caregiver())
+        profile.caregiver_profile.relationship = "FREE_TEXT_PRIVATE_NAME"
+        profile.caregiver_profile.lifestyle_tags = ["FREE_TEXT_PRIVATE_CONTACT"]
+        profile.patients[0].patient.symptoms = ["FREE_TEXT_PRIVATE_LOCATION"]
+        result = self.mapper(CONTEXT, profile, reference_time=NOW)
+        self.assertEqual(result.caregiver_profile.relationship, "FREE_TEXT_PRIVATE_NAME")
+        self.assertEqual(result.caregiver_profile.lifestyle_tags, ["FREE_TEXT_PRIVATE_CONTACT"])
+        self.assertEqual(result.managed_patient_profiles[0].symptoms, ["FREE_TEXT_PRIVATE_LOCATION"])
