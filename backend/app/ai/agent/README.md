@@ -113,6 +113,13 @@ parallel_safe=True이면 공용 Runner가 최대 3개씩 병렬 실행한다. �
 ChatPromptBuilder는 raw AgentContext 초기 메시지를 제외하고 정책과 사용자 데이터를 조립한다.
 Tool 결과 연결은 요청별 Conversation이 맡으며 공용 Runner가 기존 Chat structured policy를 삽입한다.
 Tool/질문/Evidence는 비신뢰 데이터다.
+성공한 Chat 검색 결과에는 `source_reference={tool_call_id:실제 call_id,index_base:0,evidence_indices:[...]}`를
+ToolResultEnvelope에 추가한다. `data.evidence`는 재정렬/축약하지 않고 원본 순서를 유지한다.
+이 필드는 ChatAnswerV1 실행에만 포함하며 Feed/legacy Tool 결과 JSON에는 추가하지 않는다.
+실패 결과에는 인용 안내를 붙이지 않고, 정상 0건은 success=true와 빈 evidence/indices로 구분한다.
+Tool 이름이나 Provider 출력 항목 id는 Citation ID가 아니며, 최종 인용은 기존 서버 resolver가 검증한다.
+Chat 전용 Prompt는 관찰연구/Protocol/대상군/주체/불확실성 해석과 null/부분 조회/조회 실패의 의미를
+구분한다. 연구 유형을 Agent에서 일괄 제외하거나 Feed 후보·추천 정책을 복사하지 않는다.
 최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
 응답의 임상적 정확성을 강제하는 검증은 아니다. 실제 Provider 의미적 동작은 아직 검증하지 않았다.
 
@@ -1524,7 +1531,16 @@ Assembler/Frontend DTO 생성은 구현하지 않았다. 현재 RAG는 DB paper 
 가짜 URL을 생성하지 않는다. Structured Chat의 answer에는 inline 인용 번호를 생성하지
 않도록 안내하며, citation_refs만 authoritative 출처 연결로 사용한다. 기존 mock의 [1] 같은
 본문 표기를 근거로 서버가 번호를 신뢰하지 않는다. 모델이 정책을 무시하고 번호를 출력해도
-일반 answer 문자열일 뿐 출처 연결로 해석하지 않는다. 별도 marker validator는 도입하지 않았다.
+일반 answer 문자열일 뿐 출처 연결로 해석하지 않는다.
+ChatExecutionV1은 JSON과 Citation 검증이 끝난 completed 결과에서만 보수적인 표시 후처리를 수행한다.
+검증된 citation_refs가 있고, 그 개수 범위의 `[1]`/`[1][2]`가 문장부호 바로 뒤에 붙은 경우만 제거한다.
+코드/인용문/수식, 사용자 질문에 등장한 표식, 번호 목록/배열, 독립 표식과 공백으로 분리된 표식 등
+모호한 본문은 보존한다. 숫자는 출처 ID가 아니므로 잘못된 Citation을 복구하거나 새 연결을 만들지 않는다.
+보호 구간을 먼저 수집하며 http/https URL 자체, Markdown blockquote(빈 줄 전의 연속 문맥 포함),
+DOC.[1]/ABC-123.[1] 같은 영문·숫자 식별자 형태도 보존한다. 영문 문장 끝의 word.[1]과 식별자를
+확정적으로 구분할 수 없으므로 이 형태도 남긴다. 보호 구간 밖의 일반 문장은 계속 후처리한다.
+수정 시 answer와 execution.final_answer를 함께 갱신하고 wrapper를 재검증한다. refs/sources는 그대로다.
+공통 Runner를 직접 호출하는 경로에는 이 ChatExecution 표시 후처리를 적용하지 않는다.
 
 정책은 relevance_score를 검색 유사도로만 사용하고 근거 등급/의학적 확신도로 해석하지 않는다.
 근거 없는 인용·환자 사실·개인화 설명을 만들지 않고, 빈 검색을 효과 없음/안전함으로 해석하지

@@ -318,7 +318,8 @@ class AgentLoopRunner:
                                 evidence_by_call[call.id] = package.model_copy(deep=True)
                         stage = "executor_error"
                 stage = "conversation_error"
-                bounded_call(lambda: conversation.append_turn(turn, outcomes))
+                bounded_call(lambda: conversation.append_turn(turn, outcomes,
+                    include_search_references=output_model is ChatAnswerV1))
         except RequestTimeout:
             state.final_answer = None
             error = AgentError(code="request_timeout", message="Agent 전체 실행 시간이 초과되었습니다.")
