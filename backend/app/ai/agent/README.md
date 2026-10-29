@@ -157,6 +157,84 @@ recommendations의 PMID mapping은 존재하지만 ChatWorkflow와 연결하지 
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_chat_workflow app.ai.agent.tests.test_chat_execution app.ai.agent.tests.test_workflows app.ai.agent.tests.test_outputs
 ```
 
+## ChatWorkflow Dialogue Policy 및 후속 확장 시 재검토 사항
+
+### 이번 정책의 범위와 책임
+
+`ChatPromptBuilder`는 공통 System Prompt → `CHAT_DIALOGUE_POLICY` → `CHAT_TOOL_POLICY` →
+`CHAT_EVIDENCE_POLICY` → `CHAT_DATA_POLICY` 순서로 조립한다. Dialogue Policy는 요청 이해,
+환자·보호자·다른 사람의 구분, 직접 답변·필요한 명확화 질문·정서적 지원과 긴급 안전 안내의
+우선순위를 담당한다. 응급 징후에는 조회나 긴 문진보다 안전 대응을 우선하며 일상적인 건망증이나
+간병 피로를 자동으로 응급 상황으로 취급하지 않는다. 제공되지 않은 이전 대화를 기억했다고 말하지 않는다.
+
+Tool Selection Policy는 현재 `get_patient_profile`, `get_recent_care_logs`, `search_evidence`의
+실제 사용 필요성을 구분한다. 일반 설명에는 Tool을 강제하지 않으며 최신·특정 연구 확인 요청에는
+제공된 검색 Tool을 사용하도록 안내한다. Evidence/Data Policy는 현재 코퍼스와 실제 조회 범위,
+근거·저장 데이터의 의미와 한계를 담당한다. Tool Contract와 서버 검증·권한은 기존 실행 계층의 책임이다.
+환자 선택 여부는 인증·소속 권한의 증거가 아니다.
+
+이번 변경은 시스템 프롬프트 정책과 정적 회귀 검증이다. 새 Tool, 대화 이력, 의료 위험 분류기나
+새 Agent 실행 구조를 추가하지 않았다. 기존 3단계 Workflow, Runner, Responses API,
+`tool_choice="auto"`, ChatAnswerV1 및 Citation Resolver를 유지한다. Dialogue Policy는 Chat에만 적용한다.
+
+### 향후 Tool 확장
+
+새 Tool을 실제로 추가할 때 다음을 재검토한다. 미래 Tool의 이름이나 기능을 현재 프롬프트에 가정하지 않는다.
+
+- 실제 목적과 지원할 사용자 요청, 기존 Tool과의 책임 중복.
+- 호출할 때와 호출하지 않을 때, Tool 없이 직접 답변할 수 있는 요청과의 경계.
+- 다른 Tool과의 조합 및 호출 순서, 앞선 결과가 필요한 경우의 판단.
+- 사용 불가·조회 실패·부분 성공을 알리는 방식.
+- 응급 대응·명확화 질문·Tool 사용의 우선순위와 기존 Dialogue 일반 원칙의 적절성.
+
+우선 Tool Selection Policy를 확장하고, 실제 대화 행동의 원칙이 달라질 때에만 Dialogue Policy를 수정한다.
+
+### 향후 Tool Contract 및 Handler 구체화
+
+기존·신규 Tool의 실제 데이터 제공 기능이 완성되면 다음을 확인한다.
+
+- 반환 필드와 사용자 질문의 대응, 조회 가능한 범위와 제공 불가능한 정보.
+- 환자·보호자·다른 사람의 정보 Scope 및 실제 권한·소속 검증.
+- 요청 기간과 실제 반환 범위의 차이, 누락·빈 결과·부분 조회·실패의 구분.
+- Tool 출력의 신뢰 경계와 개인정보 취급, Contract와 `CHAT_DATA_POLICY`의 정합성.
+- 검색 Tool의 실제 코퍼스 범위와 `CHAT_EVIDENCE_POLICY`의 정합성.
+
+이는 후속 점검 목록이며 이번 정책 작업에서는 Contract·Handler·Adapter를 수정하지 않는다.
+
+### 향후 대화 이력 연결
+
+현재 Chat 입력은 요청별 사용자 질문과 환자 선택 여부를 전달하며, 과거 대화 이력 연결은 아직
+완성되지 않았다. 명확화 질문을 생성할 수 있다는 사실이 다중 턴 이력 기능의 구현을 뜻하지 않는다.
+권한 검증된 이력을 연결할 때 다음을 다시 확인한다.
+
+- 이전·현재 사용자 발화의 문맥과 AI의 명확화 질문·사용자의 후속 답변 연결.
+- 이미 확인한 내용의 반복 질문 방지와 이전 환자·현재 선택 환자의 혼동 방지.
+- 오래된 정보와 현재 정보의 구분, 이력의 신뢰 경계와 개인정보 보호.
+- 이력 제공 범위 및 요약·잘림으로 인한 불확실성.
+- Dialogue Policy의 문맥 사용 규칙과 복수 턴 상담의 실제 LLM 행동.
+
+대화 연속성은 후속 개발 항목이다. Memory Manager, 대화 저장소·요약기·새 이력 DTO는 이번에 추가하지 않았다.
+
+### 후속 실제 LLM 행동 평가
+
+정책 구현·정적 테스트 통과와 실제 LLM의 의료 안전성·상담 품질 검증은 별개다.
+향후 실제 Provider 및 Tool 연결 상태에서 다음을 평가한다.
+
+- 직접 답변과 불필요한 Tool 호출, 필요한 명확화 질문.
+- 환자·보호자의 증상 주체 구분 및 보호자 정서적 지원.
+- 갑작스러운 인지 변화 등 위험 상황에서의 안전 대응.
+- 특정 연구 요청의 실제 근거 검색 및 여러 Tool이 필요한 복합 질문.
+- 조회 범위 밖의 사실 생성 여부와 다중 턴 대화 연속성.
+
+고위험 의료 상황은 전체 평균 품질 점수와 구분하여 평가하고 필요하면 전문적인 검토를 받는다.
+실제 Provider 테스트나 의료 평가 시스템은 이번 구현에 포함하지 않는다.
+
+오프라인 회귀 검증 (`backend/`, Provider Integration 비활성화):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PRELOAD_EMBEDDING_MODEL=0 PYTHONPATH=. .venv/bin/python -B -m unittest app.ai.agent.tests.test_chat_policy app.ai.agent.tests.test_chat_execution app.ai.agent.tests.test_chat_workflow app.ai.agent.tests.test_outputs
+```
+
 ## FeedWorkflow: 정식 Production Stage 1과 세 단계 실행
 
 Feed ownership은 간병인/user다. 정식 Stage 1은 전체 관리 환자 0~20명을 서로 구분하며
