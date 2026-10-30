@@ -9,6 +9,7 @@ from .schemas import AgentContext
 from .tools import contracts as c
 from .tools.medications import PATIENT_MEDICATIONS_DATA_POLICY
 from .tools.medical_visits import PATIENT_MEDICAL_VISITS_DATA_POLICY
+from .tools.assessments import PATIENT_ASSESSMENTS_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -17,6 +18,7 @@ class ToolName(str, Enum):
     SEARCH_EVIDENCE = "search_evidence"
     PATIENT_MEDICATIONS = "get_patient_medications"
     PATIENT_MEDICAL_VISITS = "get_patient_medical_visits"
+    PATIENT_ASSESSMENTS = "get_patient_assessments"
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,13 @@ TOOL_CONTRACTS = {
                      "미방문 상태는 예약 확정이나 결석을 의미하지 않는다.",
                      c.PatientMedicalVisitsInput, c.PatientMedicalVisitsOutput,
                      data_policy=PATIENT_MEDICAL_VISITS_DATA_POLICY, patient_scoped=True),
+        ToolContract(ToolName.PATIENT_ASSESSMENTS,
+                     "서버가 선택한 환자의 등록된 인지기능·치매 중증도·일상생활 기능·행동·심리 증상 및 우울 관련 "
+                     "검사·평가 기록을 읽기 전용으로 조회한다. 검사 종류별 최신 결과 또는 과거 평가 이력을 확인하며, "
+                     "검사명, 점수, 평가 날짜, 세부 결과, 평가 주체와 점수 척도 정보를 반환한다. "
+                     "등록된 점수와 평가 결과만으로 현재 임상 상태나 질환 진행을 확정하지 않는다.",
+                     c.PatientAssessmentsInput, c.PatientAssessmentsOutput,
+                     data_policy=PATIENT_ASSESSMENTS_DATA_POLICY, patient_scoped=True),
     )
 }
 

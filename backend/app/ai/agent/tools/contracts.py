@@ -7,6 +7,7 @@ from pydantic import AwareDatetime, Field, JsonValue, StrictInt, field_validator
 from ..schemas import AgentModel
 from .medications import MedicationItem, PatientMedicationsInput, PatientMedicationsOutput
 from .medical_visits import MedicalVisitItem, PatientMedicalVisitsInput, PatientMedicalVisitsOutput
+from .assessments import AssessmentItem, PatientAssessmentsInput, PatientAssessmentsOutput
 
 
 class PatientProfileInput(AgentModel):

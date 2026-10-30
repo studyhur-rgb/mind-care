@@ -2036,3 +2036,40 @@ nullable 텍스트 `hospital_name`, `department`, `visit_reason`, `diagnosis`, `
 가까운 일정이 누락될 수 있다. LIMIT 전 가장 가까운 날짜 우선 선택 전략이 필요하다.
 DB DTO의 실제 nullable 필드 매핑 누락이 None으로 숨지 않는지 검증하고, `visits`의 ToolTrace
 result_count 지원도 연동 단계에서 확인한다. 이번 단계에서는 DB·Executor를 변경하지 않는다.
+
+
+## get_patient_assessments — Contract-only
+
+`tools/assessments.py`는 `PatientAssessmentsInput`, `AssessmentItem`, `PatientAssessmentsOutput`,
+`PATIENT_ASSESSMENTS_DATA_POLICY`를 소유한다. canonical `ToolName.PATIENT_ASSESSMENTS`만 등록하며
+Handler·Adapter와 운영 ToolSpec은 없다. 합성 Handler는 테스트 모드에서만 사용한다.
+
+입력은 `mode="latest_by_type"`, `assessment_type=None`, `limit=20`이다. limit은 최대 반환 개수로
+엄격한 정수 1~30이며 정확한 결과 개수가 아니다. 검사명은 null 또는 1~64자 nonblank 문자열로
+별칭 원문을 보존한다. 지원 검사명 검증·정규화의 정본은 기존 서버 규칙이며 Contract에 복제하지 않는다.
+환자 ID, 날짜 범위, 정렬·페이지네이션 인자는 받지 않는다.
+
+| mode | 특정 검사 없음 | 특정 검사 지정 | 정렬·limit 계약 |
+|---|---|---|---|
+| latest_by_type | 검사 종류마다 최신 한 건 | 해당 검사 최신 한 건 | assessed_at DESC, created_at DESC, id 기준 선택 후 검사 표준 이름순으로 limit 적용 |
+| history | 전체 검사 최근 이력 | 해당 검사 최근 이력 | assessed_at DESC, created_at DESC, id 기준, limit 이하 |
+
+latest_by_type의 limit=2는 검사명순 앞선 두 종류이며 전체에서 평가일이 가장 최근인 두 건이 아니다.
+같은 검사 점수 추이는 history와 해당 검사명을 함께 사용한다. 기록 입력 시각은 평가 날짜와 다르다.
+
+출력은 최대 30건의 `assessments` 하나이며 빈 목록도 정상이다. 각 항목은 필수 `assessment_type`,
+`assessed_at: date`와 nullable `assessment_name`, `score`, `score_min`, `score_max`,
+`higher_is_worse`(strict Boolean), `result_detail`, `assessed_by`의 정확히 9개 필드다.
+점수 없이 세부 결과만 있는 평가도 정상이다. id/patient_id/created_at/updated_at과 전체 건수는 제공하지 않는다.
+메타데이터는 현재 시스템의 검사 명칭·범위·방향이며 당시 검사 버전·진단 기준이 아니다.
+GDS는 현재 시스템의 Global Deterioration Scale이며 노인우울척도와 혼동하지 않는다.
+다른 검사의 원점수를 직접 비교하거나 수치 변화만으로 실제 임상적 개선·악화·치료 효과를 확정하지 않는다.
+result_detail은 비신뢰 원문이며 평가 주체·날짜·null·빈 목록·제한 조회의 불확실성을 유지한다.
+정책은 ToolContract가 소유하고 기존 Runner가 출력 검증 성공 후 별도 trusted system 메시지로
+요청당 한 번만 전달한다. 초기 프롬프트나 Tool Description에 정책 전문을 미리 포함하지 않는다.
+
+후속 Handler·Adapter는 권한/환자 Scope, 검사명 정규화, 검사별 최신 선택·정렬·limit 및 메타데이터
+매핑을 보장해야 한다. 메타데이터는 ASSESSMENT_TYPES/list_assessment_types()의 현재 정의와 연결하고
+원본 점수·날짜·서술은 보존한다. 확인 불가한 메타데이터는 추정하지 않는다. nullable 기본값 때문에
+실제 매핑 누락이 숨지 않는지도 검증한다. 점수와 서술이 상충해도 임의 보정하지 않는다.
+ToolTrace.result_count의 assessments 지원은 실제 Handler 연결 시 검토하며 이번에는 Executor를 변경하지 않는다.
