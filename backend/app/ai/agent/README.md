@@ -34,7 +34,7 @@ Chat Completions 호출·자동 폴백·암묵적 generation-options ContextVar�
   PromptBuilder는 정책과 데이터만 조립하며 Provider 이력을 합성하지 않는다.
 - `agent_loop_runner.py`: 기존 단일 Loop가 Feed/Chat의 예산·권한·Executor·Evidence·
   최종 JSON 검증을 계속 소유한다. Feed 후보 투영은 generation snapshot에만 붙이므로
-  이전 candidate_revision 목록을 다음 요청에 중복 누적하지 않는다.
+  이전 후보 목록을 다음 요청에 중복 누적하지 않는다.
 
 Provider 요청은 `store=False`, `include=["reasoning.encrypted_content"]`를 사용하며
 `previous_response_id`를 사용하지 않는다. reasoning 항목은 요청별 opaque continuation으로
@@ -66,6 +66,89 @@ Responses fixture, function_call/call_id, 평탄한 tools.name 검사로 변경�
 Backend 프로덕션 조립·HTTP·저장 Handoff를 Responses MockTransport로 검증한다.
 Backend 프로덕션 코드/호출 계약의 변경은 필요하지 않다. 인증된 실제 Provider·DB·RAG
 통합은 별도이며 API Key 없는 오프라인 통과가 모델 지원이나 의료 품질을 보장하지 않는다.
+
+## 공통 Evidence 관리와 서버 출처 결합
+
+현재 출처 관리 정본은 `evidence.py`의 요청별 `EvidenceStore`다. 실행 총괄은 기존
+`AgentLoopRunner` 하나이며 별도 Runner, Planner, 재시도·교정 LLM을 추가하지 않는다.
+ToolExecutor는 기존 입력/출력 검증을 수행한다. 표준 `EvidencePackage` 출력 Contract가
+성공한 경우에만 Runner가 Store에 등록하므로 향후 같은 근거 Contract를 쓰는 Tool도 이름 분기 없이 재사용한다.
+검색·RAG·Handler는 답변/추천 Draft나 Citation 구조를 알 필요가 없다.
+
+### 원본과 스냅샷의 소유권
+
+Store는 원본 항목을 불변 JSON 문자열로 한 번 보관한다. 반환하는 Pydantic 객체는 분리된
+사본이다. 원본 입력·반환 사본·모델 projection을 수정해도 서버 원본은 바뀌지 않는다.
+`EvidenceKey`는 원본 출현 위치, `EvidenceCandidate`는 원본 사본이 아닌 Store 접근 핸들이다.
+Runner의 별도 evidence 목록/`evidence_by_call`과 FeedCandidate의 EvidenceItem 사본을 제거했다.
+기존 `resolve_evidence_references()`는 외부 서버 DTO 검증용 호환 진입점으로 유지하되 실제
+검증·메타데이터 복사는 Store에 위임한다. 실 Runner는 이 호환 wrapper나 별도 원본 mapping을 만들지 않는다.
+
+`EvidenceSnapshot`은 순서가 고정된 키 tuple, 서버 버전, 요청 소유권을 가진 불변 값이다.
+Store의 현재 snapshot 객체와 동일해야 하며 오래된·위조된·다른 요청의 snapshot은 거부한다.
+Runner가 모델 호출 직전에 선택한 snapshot을 해당 응답 검증에 그대로 전달한다.
+Feed staging은 선택 상태만 복제하고 같은 원본 Store를 공유한다. 전체 검색 묶음 검증 후 등록하며,
+실패·timeout이면 요청을 종료하고 후보/후속 메시지를 발행하지 않는다. 요청 이후 영속 상태는 없다.
+
+Chat은 실제 Provider call_id를 원본 키로 사용한다. Feed 배열 검색은 기존 내부 검색 ID를
+원본 키로 유지하고 실제 Provider call_id를 Store에 별도로 보존한다. 원래 출력 항목 id와 혼동하지 않는다.
+Provider function_call/결과의 순서·call_id·reasoning continuation은 그대로다.
+원본 출현 키의 중복은 거부한다. Chat은 동일 PMID의 서로 다른 출현을 합치지 않으며 PMID 없는
+가이드라인도 인용 가능하다. Feed만 기존 PMID 적격성·중복 제외·연구 유형/등급·주제별 순위 정책을 적용한다.
+
+### Chat 내부 Draft와 공개 결과
+
+성공 검색의 function_call_output은 건수와 최신 후보 안내만 전달한다. 모든 성공 출현을
+원래 검색/배열 순서로 모은 `untrusted_chat_candidates` projection 하나만 호출 snapshot에 붙인다.
+원본 PMID/DOI/URL 및 Provider 참조를 선택용 데이터로 노출하지 않는다. 논문 본문은 user 데이터이며
+Tool 결과와 마찬가지로 비신뢰다. projection을 history에 누적하지 않는다.
+
+```json
+{"answer":"사용자에게 전달할 설명","selected":[true,false,true]}
+```
+
+LLM은 전체 답변에 대해 후보별 인용 여부를 한 번 판단한다. 번호 목록(A)은 희소 선택에 출력이
+짧지만 index 범위·중복 검증과 번호 복사가 필요하다. Boolean 배열(B)은 후보 수만큼 출력하지만
+순서/개수 대응이 단순하고 원본 식별자·후보 번호를 생성할 필요가 없어 B를 선택했다.
+구간마다 mask를 반복하지 않는다. 정상 검색 계약의 최대 10 calls × top_k 20이면 후보는 최대 200개다.
+최대 20개 인용 제한은 공개 ChatAnswerV1 검증에서 유지하며 조용히 자르지 않는다.
+
+서버는 strict Boolean, 정확한 길이, 현재 snapshot을 검증한 뒤 원본 EvidenceReference와
+ResolvedEvidence를 결합한다. 외부 `ChatAnswerV1`/`StructuredAgentResult`의 필드·버전은 그대로다.
+검색 전/정상 0건은 selected=[], 후보가 있어도 일반 설명이면 전체 false가 가능하다.
+잘못된 mask나 identifier 필드는 invalid_response로 거부한다. 연구 주장인지 서버가 추측하여
+인용만 제거하거나 다른 근거로 바꾸는 fallback은 하지 않는다. 유효한 무인용 Draft는 정상 반환한다.
+
+### Feed 중간 판단
+
+```json
+{"queries":["more specific research question"],"review":{"decisions":[{"include":false},{"include":true,"personal_reason":"유지 이유","category":"care"}]}}
+```
+
+중간 review도 전체 현재 후보 순서에 대응하는 decisions를 사용한다. candidate_index와
+candidate_revision은 LLM 입력/출력에서 제거했다. 버전 검증은 Store와 Runner가 전달한 snapshot의
+객체 동일성/소유권/현재성으로 수행한다. 첫 검색 review는 금지, 후속 검색에는 필수다.
+동일 turn의 여러 Call은 한 곳에 review를 넣거나 동일한 review만 반복할 수 있다.
+유지 최대 5편, 검토 최대 10편, 최종 추천 최대 5편 및 3라운드·9검색·top_k=8 예산은 그대로다.
+최종 FeedDecisionDraft는 기존처럼 후보별 include/이유/category만 판단하고 서버가 원본을 결합한다.
+
+스냅샷 결합은 과거 응답을 새 서버 상태에 적용하는 오류를 차단한다. 다만 모델이 같은 길이의
+과거 mask를 기억해 다시 출력하거나 후보 의미/순서를 잘못 이해한 경우를 내용만으로 판별하지는 못한다.
+형식·출처 식별 검증과 의미적 인용 정확성은 별개다.
+
+### Structured Outputs와 검증 한계
+
+SDK 1.109.1은 Responses `text.format`의 JSON Schema 형식을 지원한다. 다만 실제 주입 모델의
+지원 여부는 API 없이 확정할 수 없어 이번에는 이를 무조건 강제하지 않았다. 내부 JSON Schema 안내와
+서버 strict 검증을 적용하며 실제 Provider 사용 시 지원 모델에서 text.format 적용을 별도 검토한다.
+서버는 배열 길이·현재 snapshot·출처 결합을 계속 검증해야 한다. 기존 refusal/incomplete/timeout
+처리와 SDK retry 금지는 유지한다.
+
+오프라인 검증은 실제 SDK+MockTransport, 공통 Store 오류 주입, 원본 변경 방지, 병렬 요청 격리 및
+100회 결정적 임의 Call ID 시나리오를 포함한다. 실제 모델 수용/의미 판단·토큰·지연·의료적 적합성은
+실측하지 않았다. 실제 Provider 후속 평가는 호출/결과 뒤 System 정책과 reasoning continuation 수용,
+mask 형식 성공률, 출처 원본 일치, 주장-논문 관련성, 추천 적합성, 입력/출력 토큰·지연을 분리하여 측정한다.
+복약 Contract·정책 원문·성공 후 요청별 단일 System 정책 전달과 환자 Scope 선언은 그대로다.
 
 ## ChatWorkflow: 세 단계 Skeleton
 
@@ -113,11 +196,9 @@ parallel_safe=True이면 공용 Runner가 최대 3개씩 병렬 실행한다. �
 ChatPromptBuilder는 raw AgentContext 초기 메시지를 제외하고 정책과 사용자 데이터를 조립한다.
 Tool 결과 연결은 요청별 Conversation이 맡으며 공용 Runner가 기존 Chat structured policy를 삽입한다.
 Tool/질문/Evidence는 비신뢰 데이터다.
-성공한 Chat 검색 결과에는 `source_reference={tool_call_id:실제 call_id,index_base:0,evidence_indices:[...]}`를
-ToolResultEnvelope에 추가한다. `data.evidence`는 재정렬/축약하지 않고 원본 순서를 유지한다.
-이 필드는 ChatAnswerV1 실행에만 포함하며 Feed/legacy Tool 결과 JSON에는 추가하지 않는다.
-실패 결과에는 인용 안내를 붙이지 않고, 정상 0건은 success=true와 빈 evidence/indices로 구분한다.
-Tool 이름이나 Provider 출력 항목 id는 Citation ID가 아니며, 최종 인용은 기존 서버 resolver가 검증한다.
+성공한 Chat 검색 결과는 원본을 EvidenceStore에 보존하고 건수/최신 후보 안내만 Tool 결과로 전달한다.
+최신 untrusted_chat_candidates와 ChatDraft.selected를 서버 snapshot으로 연결하여 참조를 생성한다.
+실패 결과는 인용 후보가 아니며 정상 0건은 성공한 빈 후보로 구분한다. Feed/legacy Tool 결과 형식은 유지한다.
 Chat 전용 Prompt는 관찰연구/Protocol/대상군/주체/불확실성 해석과 null/부분 조회/조회 실패의 의미를
 구분한다. 연구 유형을 Agent에서 일괄 제외하거나 Feed 후보·추천 정책을 복사하지 않는다.
 최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
@@ -341,7 +422,7 @@ ai_summary(없으면 abstract) 발췌 최대 1,200자만 제공한다. 식별 me
 자유 텍스트의 개인정보 제거를 보장하지 않는다. 후보 본문은 비신뢰 데이터이고 system 정책이 아니다.
 
 LLM은 `{"decisions":[{"include":true,"personal_reason":"...","category":"care"},{"include":false}]}`
-형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 실제 검토 후보 수(최대 15편)만큼의 판단이 필요하고,
+형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 실제 검토 후보 수(최대 10편)만큼의 판단이 필요하고,
 제외 항목에는 이유/category/null도 허용하지 않는다. 선택 수가 5를 넘거나 길이가 다르면 실패한다.
 출처 ID·추가 필드·중복 JSON 키도 거부한다. 검색 성공 후 후보 0개/판단 0개 및 전체 제외는 정상 빈 Feed다. 검색 미실행은 정상 완료할 수 없다.
 서버는 후보 순서로 원본 참조를 결합하고 Snapshot 일치 및 기존 `resolve_evidence_references()`를
@@ -1558,7 +1639,7 @@ feed = engine.run_structured(user_input, context, output_model=FeedAnswerV2)
 구조화 정책은 첫 user message 직전에 삽입하며 Builder의 기존 메시지 순서는 보존한다.
 기본 순서는 system 정책 → system Context → system 구조화 정책 → user 원문이다.
 Structured 모드에서는 `build_final_response_context()`의 aggregate evidence copy를 생략한다.
-Chat은 call ID가 있는 원래 Tool Result의 전체 EvidencePackage를 계속 전달한다.
+Chat은 원본을 Store에 보존하고 Tool acknowledgment와 최신 후보 projection을 전달한다.
 Feed는 내부 Snapshot을 보관하고 성공 Tool message의 긴 근거를 최소화한 뒤 최신 후보 목록을 전달한다.
 legacy `run()`은 기존 aggregate evidence message와 Builder 호출 동작을 유지한다.
 Tool Call이 없는 마지막 `ModelTurn.text`를 단일 JSON object로 검증한다.
@@ -1613,20 +1694,17 @@ Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 �
 
 ### 출처 참조 검증과 서버 조립 경계
 
-AgentLoopRunner는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
-요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 서버 Snapshot은 바꾸지 않는다.
-Chat 모델은 function_call_output의 call_id와 output JSON의 data.evidence 위치를 참조한다.
-Feed 모델은 후보별 include/이유/category만 반환하며, 원본 참조를 결합하는 책임은 서버에 있다.
-`resolve_evidence_references(output, evidence_by_call)`는 output을 다시 검증하고,
-현재 요청의 성공 검색 존재/0-based index 범위를 검사한다. 실패한 검색/다른 Tool/다른 요청의
-ID/없는 근거를 인용할 수 없다. helper를 직접 쓸 때도 성공 검색 snapshot만 제공해야 한다.
-이 검증은 의료적 함의, 환자 사실, 인용 문장과 논문 내용의 일치까지 증명하지 않는다.
+AgentLoopRunner는 검증된 성공 EvidencePackage를 요청별 EvidenceStore에 등록한다.
+ChatDraft.selected 및 FeedDecisionDraft/FeedReview의 decisions는 서버가 전달한 현재 snapshot에 결합한다.
+참조 존재·중복·원본 위치·snapshot 소유권/현재성을 Store가 검증한다. Provider call_id나 metadata를
+모델의 최종 출력에서 읽지 않는다. 외부 helper resolve_evidence_references는 동일 Store 검증에 위임한다.
+출처 식별 검증은 환자 사실이나 논문과 답변의 의미적 일치까지 증명하지 않는다.
 
 서버용 `ResolvedEvidence`는 source_ref와 실제 evidence_type/title/pmid/doi/journal/
 publication_year/study_type/organization/source_url/full_text_available만 원본에서 복사한다.
 없던 metadata는 null 그대로 유지하고 abstract/ai_summary/전체 환자 기록은 반환하지 않는다.
 LLM이 이 metadata를 반환하는 schema는 없다. 이 클래스와 StructuredAgentResult는 서버용이며
-LLM 최종 출력 모델은 ChatAnswerV1/내부 FeedDecisionDraft이며 외부 최종 DTO는 ChatAnswerV1/FeedAnswerV2다.
+LLM 최종 출력 모델은 내부 ChatDraft/FeedDecisionDraft이며 외부 최종 DTO는 ChatAnswerV1/FeedAnswerV2다.
 
 | AI 콘텐츠 | 현재 Frontend 매핑 | 신뢰 가능한 서버 조립 |
 |---|---|---|
@@ -1711,7 +1789,7 @@ failed로 반환하며 추가 모델 호출이나 자동 재검색을 수행하�
 Cold Start의 최초 Tool Call, 1~3회 검색 후 상태, 예산 소진 뒤 최종 판단, AI Handoff를 확인한다.
 MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·검색 품질·토큰 비용은 검증하지 않는다.
 
-### Feed 병렬 검색과 검토 후보 15편 통합
+### Feed 병렬 검색과 검토 후보 10편 통합
 
 공통 Runner는 allow_parallel_tools=False가 기본이며, FeedExecutionV1은 True / max_parallel_calls=3이다.
 ChatExecutionV1도 True / max_parallel_calls=3을 사용한다. 한 턴 전체가 등록된 parallel_safe Tool이고
@@ -1736,7 +1814,7 @@ Decimal 비교로 경계 오차를 방지하고, 이웃 점수의 연쇄 근접�
 그룹 안에서는 파생 A→B→C→D→미확인, 같은 등급에서는 원본 순위를 사용한다. 그룹 사이 원래 순서는 보존한다.
 서로 다른 query 점수는 비교하지 않는다. 고정된 2개 순위 묶음은 사용하지 않는다.
 주제별 목록을 요청 순서로 라운드 로빈 순회하며 실제 선택 시점에만 PMID를 중복 제거한다.
-중복/제외 뒤의 유효 항목도 순회해 검토 후보 최대 15편을 확보하고 원본 tool_call_id/evidence_index를 그대로 보존한다.
+중복/제외 뒤의 유효 항목도 순회해 검토 후보 최대 10편을 확보하고 원본 tool_call_id/evidence_index를 그대로 보존한다.
 other/None/미등록 유형은 의견 글로 단정하지 않고 후보로 남긴다. 분류 오류를 숨기거나 제목으로 재분류하지 않는다.
 서버의 관련성 평가는 검색 주제 커버리지와 query별 RAG 순위에 한정된다. 실제 대상/개인화 관련성은
 기존 최종 LLM이 제목·발췌로 판단한다. 별도의 LLM 재순위화와 5편 강제 충원은 없다.
@@ -1784,7 +1862,7 @@ study_type 기반 파생 등급을 압축에 활용한다. Projection에는 deri
 파생 등급은 기존 규칙의 참고값이며 실제 DB 저장 등급이나 임상적 품질 확정값이 아니다.
 DB 저장 등급을 통한 정렬에는 검색 담당자의 조회/DTO 계약 협의가 필요하다. 추가 DB 조회는 없다.
 
-LLM 검토 후보 15편과 유지/최종 추천 각각 5편은 최대치다. 검색 반환 수, 유형 제외·중복/PMID 누락 후 후보 수, LLM 선택 수, Backend DB 매핑 후 수는 다를 수 있다.
+LLM 검토 후보 10편과 유지/최종 추천 각각 5편은 최대치다. 검색 반환 수, 유형 제외·중복/PMID 누락 후 후보 수, LLM 선택 수, Backend DB 매핑 후 수는 다를 수 있다.
 정상적으로 유익한 공통 논문은 여러 사용자에게 추천할 수 있다. 사용자 간 이력 조회나 전역 중복 금지는 없다.
 관련 근거가 없는 경우 정상 빈 Feed와 기존 검색 fallback을 유지한다. 0편 비율을 낮추려고 부적합한 논문을 채우지 않는다.
 
@@ -1794,7 +1872,7 @@ LLM 검토 후보 15편과 유지/최종 추천 각각 5편은 최대치다. 검
 
 P2 보완: 원본 풀과 출처를 보존하고 주제별 라운드 로빈 순회 중 선택 시점에만 PMID 중복을 제거한다.
 A의 낮은 순위에 있는 논문도 B의 상위 순위에서 먼저 선택할 수 있고, 그 경우 B의 원본 참조/스냅샷을 사용한다.
-선택되지 않은 PMID가 다른 주제의 선택을 막지 않는다. 최신 검토 후보 최대 15편과 원본 Snapshot 검증은 유지한다.
+선택되지 않은 PMID가 다른 주제의 선택을 막지 않는다. 최신 검토 후보 최대 10편과 원본 Snapshot 검증은 유지한다.
 
 Feed 조기 종료에서는 완료 결과를 실제 도착 순서로 검증한다. 자원 admission 대기 중에도 실패를 감지한다.
 이미 Executor 진입을 시작한 호출만 total_tool_calls에 집계하고, 미시작 호출은 실행하지 않는다.
@@ -1849,22 +1927,15 @@ FakeLLM 및 실제 SDK+MockTransport는 배열 계약·분배·프로토콜만 �
 
 ### 요청 내부 검토 이력과 유지 후보 (Feed 전용)
 
-첫 검색은 기존 queries 배열만 전달한다. 후속 검색에는 현재 projection의 버전과 유지할 후보를 전달한다.
-
-```json
-{"queries":["more specific research question"],"review":{"candidate_revision":1,"retain":[{"candidate_index":0,"personal_reason":"이전 후보가 도움이 되는 이유","category":"care"}]}}
-```
-
-candidate_index는 현재 후보 목록의 0 기반 위치이고 candidate_revision은 서버가 발행한 목록 버전이다.
-첫 검색의 review, 후속 검색의 review 누락/다른 버전, 범위 밖·중복·비정수 index, 잘못된 이유/category를 거부한다.
-같은 turn에 여러 실제 Provider Call이 있다면 review를 한 곳에 넣거나 같은 값만 반복할 수 있다.
-서버는 원본 Snapshot을 제외 후보까지 검증한다. 유지 목록 순서를 재정렬 요청으로 사용하지 않고 기존 후보 순서를 유지한다.
-review는 아직 노출하지 않은 PMID/출처를 임의 지정할 수 없다. 최종 FeedDecisionDraft 및 FeedAnswerV2 계약은 바뀌지 않는다.
+첫 검색은 queries만 전달하고 후속 검색은 현재 후보 전체 순서의 review.decisions를 전달한다.
+include=true인 항목만 이유/category를 작성해 유지하며 최대 5편이다. 버전과 원본 대응은 서버 snapshot이
+관리한다. 모델은 candidate_index/candidate_revision을 제출하지 않는다. 잘못된 길이·타입·이유/category,
+서로 다른 review, 오래된 서버 snapshot은 거부한다. 자세한 형식은 공통 Evidence 관리 절을 따른다.
 
 검색 결과 전체와 원본 index를 요청 내부에 보유한다. 이미 제시한 PMID는 다음 신규 후보 선정에서 제외한다.
 유지 후보는 prefix로 보존하며, 미검토 결과는 신규 검색 묶음의 주제부터 이전 검색 주제 순으로 라운드 로빈 순회한다.
 주제별 순위/근접 점수 내 파생 등급 정렬과 실제 선택 시점 PMID 중복 제거를 유지한다.
-유지 후보 최대 5편 + 미검토 신규/기존 후보는 항상 합계 최대 15편이다. 후보 부족/빈 결과/최종 모두 제외는 정상이며 자동 재검색하지 않는다.
+유지 후보 최대 5편 + 미검토 신규/기존 후보는 항상 합계 최대 10편이다. 후보 부족/빈 결과/최종 모두 제외는 정상이며 자동 재검색하지 않는다.
 이미 적합한 후보도 후속 review에서 버리거나 마지막 decisions에서 include=false로 제외할 수 있다.
 
 projection은 매 모델 호출의 최신 목록 하나이며 history에 저장하지 않는다. 신규 후보에만 제목/발췌/유형/파생 등급을 제공한다.
@@ -1885,18 +1956,18 @@ reviewed_count는 현재 제시하는 논문을 포함한 요청 내부 고유 P
 
 ### Feed 검토·유지·최종 추천의 독립 상한
 
-`feed_candidates.py`의 `MAX_FEED_REVIEW_CANDIDATES=15`, `MAX_FEED_RETAINED_CANDIDATES=5`,
+`feed_candidates.py`의 `MAX_FEED_REVIEW_CANDIDATES=10`, `MAX_FEED_RETAINED_CANDIDATES=5`,
 `MAX_FEED_RECOMMENDATIONS=5`를 독립적으로 적용한다. 후보 압축 상한과 최종 추천 상한은 다르다.
-후보 0~15편에 대해 정확히 같은 수의 decisions를 요구한다. include=true가 6개 이상이면
+후보 0~10편에 대해 정확히 같은 수의 decisions를 요구한다. include=true가 6개 이상이면
 `too_many_selected`로 거부하며 5개로 자르지 않는다. 외부 FeedAnswerV2.items는 계속 최대 5개다.
-유지 인덱스는 0~14이며 유지 목록은 최대 5개다. 현재 목록의 버전/실제 범위/중복 검증도 유지한다.
-유지 2편이면 신규 최대 13편, 유지 5편이면 신규 최대 10편을 제시할 수 있다. 유지 후보의 최종 제외도 가능하다.
+중간 판단 배열은 최대 10개이며 유지 선택은 최대 5개다. 현재 목록의 버전/실제 범위/중복 검증도 유지한다.
+유지 2편이면 신규 최대 8편, 유지 5편이면 신규 최대 5편을 제시할 수 있다. 유지 후보의 최종 제외도 가능하다.
 
 선정/등급/라운드 로빈/PMID 검토 이력/원본 출처 검증은 그대로다. 미검토 기존 결과도 재활용하며,
-검토 후보 15편 또는 최종 추천 5편을 채우기 위한 자동 검색은 없다. 3라운드·9검색·top_k=8·72건 예산,
+검토 후보 10편 또는 최종 추천 5편을 채우기 위한 자동 검색은 없다. 3라운드·9검색·top_k=8·72건 예산,
 Chat Tool 계약·외부 API·기본 request deadline 120초와 Tool timeout 30초는 변경하지 않았다.
 신규 후보는 기존 제목 300자/연구 유형 80자/발췌 1,200자 제한을 유지한다. retained는 판단 이유/category만 전달한다.
-신규 후보 15편의 발췌는 최대 18,000자로, 이전 5편(6,000자) 대비 최대 3배다. 이는 토큰 수의 정확한 비율이 아니다.
+신규 후보 10편의 발췌는 최대 12,000자로, 이전 5편(6,000자) 대비 최대 2배다. 이는 토큰 수의 정확한 비율이 아니다.
 LLM 입력/판단 시간이 증가할 수 있고 추가 검색이 줄어들 가능성도 있으나 실측 전에는 품질·비용·전체 지연 개선을 주장하지 않는다.
 실 Provider에서 15개 판단의 완전성, 기존 120초 deadline 내 종료, 유지 선택과 최종 5개 제한, 기존 두 사용자 합성/허가된 로컬 사례를
 별도로 확인해야 한다. 실제 OpenAI/RAG/PostgreSQL 테스트는 Codex 오프라인 검증에서 실행하지 않는다.
@@ -1918,8 +1989,8 @@ LLM 입력/판단 시간이 증가할 수 있고 추가 검색이 줄어들 가�
 충분한 탐색에도 관련 근거가 부족하거나 추가 탐색 기대 가치가 낮으면 0편 종료가 정상이다. 첫 라운드도 추가 검색 실익이 낮으면 종료할 수 있다.
 0편 응답을 서버가 거부/재검색하지 않는다. 예산 소진 후에도 현재 후보의 최종 판단을 반환한다.
 
-15편 검토·5편 유지·5편 최종 추천, 3라운드·9검색·top_k=8·총 72건, 후보 Snapshot·PMID 추적과 출처 검증,
-개인정보 최소화·비신뢰 Evidence 처리·Chat·외부 FeedAnswerV2/FeedReview/FeedDecisionDraft 계약은 그대로다.
+10편 검토·5편 유지·5편 최종 추천, 3라운드·9검색·top_k=8·총 72건, 후보 Snapshot·PMID 추적과 출처 검증,
+개인정보 최소화·비신뢰 Evidence 처리·Chat·외부 FeedAnswerV2 및 최종 FeedDecisionDraft는 유지하고 중간 FeedReview만 위치 배열로 변경했다.
 Runner·후보 선택 알고리즘·추가 Evaluator/Planner 호출·외부 평가 메타데이터·운영 로그는 추가하지 않았다.
 기존 search_progress/retained_count/candidate_count 및 execution의 라운드/실행 횟수와 최종 선택 수를 검증에 활용한다.
 

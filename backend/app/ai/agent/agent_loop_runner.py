@@ -11,10 +11,11 @@ from .feed_search_policy import (MAX_FEED_RETRIEVAL, MAX_FEED_SEARCH_ROUNDS, MAX
                                  feed_tool_definitions, prepare_feed_searches)
 from .feed_candidates import FeedCandidates, FeedDecisionError
 from .conversation import Conversation
+from .evidence import EvidenceStore
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
-                      StructuredAgentResult, validate_final_output)
+                      StructuredAgentResult)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
-from .registry import ToolName, ToolRegistry
+from .registry import ToolRegistry
 from .schemas import AgentContext, AgentError, AgentResult, AgentState, Message, ModelTurn, ToolOutcome, ToolTrace
 from .tools.contracts import EvidencePackage
 
@@ -102,9 +103,8 @@ class AgentLoopRunner:
              previously_recommended_pmids: frozenset[str] = frozenset()) -> AgentResult | StructuredAgentResult:
         state = AgentState(request_id=context.request_id)
         conversation = Conversation()
-        evidence: list[EvidencePackage] = []
-        evidence_by_call: dict[str, EvidencePackage] = {}
-        feed_candidates = (FeedCandidates(previously_recommended_pmids=previously_recommended_pmids)
+        evidence = EvidenceStore()
+        feed_candidates = (FeedCandidates(evidence, previously_recommended_pmids=previously_recommended_pmids)
                            if output_model is FeedAnswerV2 else None)
         feed_retrieval_used = 0
         feed_model_calls = 0
@@ -157,7 +157,7 @@ class AgentLoopRunner:
                 stage = "prompt_builder_error"
                 # 구조화 참조는 call ID가 있는 Tool Result만 사용한다. legacy의 근거 묶음은 유지한다.
                 messages = conversation.snapshot() + (bounded_call(
-                    lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
+                    lambda: self.prompt_builder.build_final_response_context(evidence.packages())) if output_model is None else [])
                 if feed_candidates is not None:
                     rounds_remaining = max(0, min(MAX_FEED_SEARCH_ROUNDS, self.max_tool_rounds) - state.tool_round)
                     remaining = max(0, min(MAX_FEED_SEARCHES, self.max_total_tool_calls) - state.total_tool_calls)
@@ -171,6 +171,9 @@ class AgentLoopRunner:
                         messages.append(bounded_call(lambda: feed_candidates.message(
                             remaining, model_tool_calls=feed_model_calls,
                             rounds_used=state.tool_round, rounds_remaining=rounds_remaining)))
+                selection_snapshot = feed_candidates.snapshot if feed_candidates is not None else evidence.current("chat")
+                if output_model is ChatAnswerV1 and evidence.call_ids:
+                    messages.append(bounded_call(lambda: evidence.chat_message(selection_snapshot)))
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
                 if feed_candidates is not None:
@@ -214,10 +217,10 @@ class AgentLoopRunner:
                         try:
                             if feed_candidates is not None:
                                 structured_output, sources = bounded_call(
-                                    lambda: feed_candidates.finalize(turn.text, evidence_by_call))
+                                    lambda: feed_candidates.finalize(turn.text, selection_snapshot))
                             else:
                                 structured_output, sources = bounded_call(
-                                    lambda: validate_final_output(turn.text, output_model, evidence_by_call))
+                                    lambda: evidence.finalize_chat(turn.text, selection_snapshot))
                         except FeedDecisionError as error:
                             state.errors.append(AgentError(code=error.code,
                                 message="Feed 판단 형식 또는 서버 후보 출처가 계약과 일치하지 않습니다."))
@@ -248,9 +251,9 @@ class AgentLoopRunner:
                             remaining_calls=min(MAX_FEED_SEARCHES, self.max_total_tool_calls) - state.total_tool_calls,
                             remaining_budget=MAX_FEED_RETRIEVAL - feed_retrieval_used,
                             previous_queries=feed_query_keys,
-                            reserved_ids=seen_ids | set(evidence_by_call)))
+                            reserved_ids=seen_ids | evidence.call_ids))
                         staged_candidates = deepcopy(feed_candidates)
-                        bounded_call(lambda: staged_candidates.apply_review(search_plan.review, evidence_by_call))
+                        bounded_call(lambda: staged_candidates.apply_review(search_plan.review, selection_snapshot))
                         calls = search_plan.searches
                     except FeedDecisionError as error:
                         state.errors.append(AgentError(code=error.code, message="Feed 후보 검토 정보가 계약과 일치하지 않습니다."))
@@ -288,15 +291,13 @@ class AgentLoopRunner:
                     stage = "candidate_source_mismatch"
                     for call_id, package in packages:
                         before_count = staged_candidates.eligible_count
-                        bounded_call(lambda: staged_candidates.add(call_id, package))
+                        bounded_call(lambda: staged_candidates.add(call_id, package,
+                            provider_call_id=search_plan.provider_call_id(call_id)))
                         staged_candidates.record_search(True, len(package.evidence),
                             staged_candidates.eligible_count - before_count)
                     check_deadline()
                     staged_candidates.finish_round()
                     feed_candidates = staged_candidates
-                    for call_id, package in packages:
-                        evidence.append(package)
-                        evidence_by_call[call_id] = package.model_copy(deep=True)
                     # Exactly one Tool response per REAL Provider call, even
                     # when that call fanned out to multiple server searches.
                     outcomes = search_plan.provider_outcomes(dict(packages))
@@ -311,16 +312,16 @@ class AgentLoopRunner:
                             state.errors.append(outcome.error)
                             if outcome.error.code in ("tool_timeout", "patient_context_mismatch"):
                                 return finish("failed")
-                        if outcome.success and call.name == ToolName.SEARCH_EVIDENCE.value:
+                        if (outcome.success and (spec := self.registry.get(call.name)) is not None
+                                and spec.contract.output_model is EvidencePackage):
                             stage = "evidence_validation_error"
                             package = bounded_call(lambda: EvidencePackage.model_validate(outcome.data))
-                            evidence.append(package)
-                            if output_model is not None:
-                                evidence_by_call[call.id] = package.model_copy(deep=True)
+                            bounded_call(lambda: evidence.add_search_result(call.id, package))
                         stage = "executor_error"
                 stage = "conversation_error"
                 bounded_call(lambda: conversation.append_turn(turn, outcomes,
-                    include_search_references=output_model is ChatAnswerV1))
+                    project_search_results=output_model is ChatAnswerV1,
+                    evidence_call_ids=evidence.call_ids))
                 # Only server-owned Contract text becomes policy. Keep the entire
                 # Provider output/result bundle contiguous and in original order.
                 for outcome in outcomes:

@@ -38,7 +38,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
     def test_empty_missing_pmid_and_duplicate_results_have_actual_progress(self):
         for pmids in ([], [None], ["A"]):
             for calls in (1, 2, 3):
-                turns = [review_turn(self.search(str(i), str(i)), i, (0,) if pmids == ["A"] else ()) if i else self.search(str(i), str(i)) for i in range(calls)]
+                turns = [review_turn(self.search(str(i), str(i)), 1 if pmids == ["A"] else 0, (0,) if pmids == ["A"] else ()) if i else self.search(str(i), str(i)) for i in range(calls)]
                 turns += [ModelTurn(text=json.dumps(decisions(1 if pmids == ["A"] else 0)))]
                 result, client, _ = self.run_feed(turns, {str(i): package(pmids) for i in range(calls)},
                     max_tool_rounds=3, max_total_tool_calls=9)
@@ -64,7 +64,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
             payload = json.loads(request.content)
             requests.append(payload)
             if len(requests) <= 3:
-                message = {'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + f'opaque_{len(requests)}', 'call_id': f'opaque_{len(requests)}', 'name': 'search_evidence', 'arguments': json.dumps({'query': f'research {len(requests)}', **({'review': {'candidate_revision': len(requests) - 1, 'retain': [{'candidate_index': 0, 'personal_reason': 'Retained', 'category': 'care'}]}} if len(requests) > 1 else {})}), 'status': 'completed'}]}
+                message = {'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + f'opaque_{len(requests)}', 'call_id': f'opaque_{len(requests)}', 'name': 'search_evidence', 'arguments': json.dumps({'query': f'research {len(requests)}', **({'review': {'decisions':[{'include':True, 'personal_reason':'Retained', 'category':'care'}]}} if len(requests) > 1 else {})}), 'status': 'completed'}]}
                 return httpx.Response(200, json=response_fixture(message))
             return httpx.Response(200, json=response_fixture({'text': json.dumps(decisions(1, (0,)))}))
         sdk = OpenAI(api_key="offline-placeholder", http_client=httpx.Client(transport=httpx.MockTransport(transport)))
@@ -123,7 +123,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
         for pmids in ([], [None], ["A"]):
             for calls in (1, 2, 3):
                 with self.subTest(pmids=pmids, calls=calls):
-                    turns = [review_turn(self.search(f"opaque_{i}", f"research {i}"), i, (0,) if pmids == ["A"] else ()) if i else self.search(f"opaque_{i}", f"research {i}") for i in range(calls)]
+                    turns = [review_turn(self.search(f"opaque_{i}", f"research {i}"), 1 if pmids == ["A"] else 0, (0,) if pmids == ["A"] else ()) if i else self.search(f"opaque_{i}", f"research {i}") for i in range(calls)]
                     turns.append(ModelTurn(text=json.dumps(decisions(1 if pmids == ["A"] else 0, (0,)))))
                     client = FakeLLMClient(turns)
                     registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],

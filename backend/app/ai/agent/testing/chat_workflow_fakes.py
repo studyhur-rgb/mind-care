@@ -22,9 +22,8 @@ def chat_call(name=ToolName.PATIENT_PROFILE, *, identifier="profile_1", args=Non
                     arguments={} if args is None else args)
 
 
-def chat_final(answer="안녕하세요. 무엇을 도와드릴까요?", *, refs=()):
-    return ModelTurn(text=json.dumps({"schema_version": "1", "response_type": "chat",
-                                     "answer": answer, "citation_refs": list(refs)}, ensure_ascii=False))
+def chat_final(answer="안녕하세요. 무엇을 도와드릴까요?", *, selected=()):
+    return ModelTurn(text=json.dumps({"answer": answer, "selected": list(selected)}, ensure_ascii=False))
 
 
 class FakeChatDependencies:

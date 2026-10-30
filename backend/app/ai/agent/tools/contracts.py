@@ -1,6 +1,6 @@
 """Tool의 Agent 전용 입력/출력. 확장 필드는 DB 필드가 아니다."""
 from datetime import date, timezone
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import AwareDatetime, Field, JsonValue, StrictInt, field_validator, model_validator
 
@@ -129,18 +129,9 @@ class EvidencePackage(AgentModel):
     evidence: list[EvidenceItem]
 
 
-class SearchSourceReference(AgentModel):
-    """Server-observed Chat search identity; indices refer to unchanged evidence."""
-
-    tool_call_id: str = Field(min_length=1)
-    index_base: Literal[0] = 0
-    evidence_indices: list[Annotated[int, Field(strict=True, ge=0)]]
-
-
 class ToolResultEnvelope(AgentModel):
-    """Conversation 결과. source_reference는 성공한 Chat 검색에만 공개한다."""
+    """Conversation 결과. Chat 검색 원본은 서버 EvidenceStore에 보존한다."""
 
     success: bool
     data: dict[str, JsonValue] | None = None
     error: dict[str, str] | None = None
-    source_reference: SearchSourceReference | None = None

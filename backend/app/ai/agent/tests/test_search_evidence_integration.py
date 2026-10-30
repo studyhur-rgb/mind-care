@@ -158,7 +158,7 @@ class SearchEvidenceIntegrationTests(TestCase):
 
     def test_feed_budget_is_owned_by_existing_execution_not_handler(self):
         search = Mock(return_value=package())
-        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}", revision=i-1)]) for i in range(1, 5)]
+        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}", candidate_count=(1 if i==2 else 0) if i>1 else None)]) for i in range(1, 5)]
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
         self.assertEqual(result.execution.status, "limit_reached")
@@ -170,8 +170,7 @@ class SearchEvidenceIntegrationTests(TestCase):
         search = Mock(return_value=package())
         supplied = self.registry(search)
         factory = Mock(return_value=supplied)
-        client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), chat_final(refs=[
-            {"tool_call_id": "search_1", "evidence_index": 1}])])
+        client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), chat_final(selected=[False,True])])
         execution = ChatExecutionV1(client, factory)
         result = execution(self.context, prepare_chat_input(self.context, "Synthetic question"))
         factory.assert_called_once_with(self.context)
@@ -186,8 +185,7 @@ class SearchEvidenceIntegrationTests(TestCase):
         shared = self.registry(Mock(return_value=package())).get("search_evidence")
         profile = Mock(return_value={"symptoms": ["Synthetic stored signal"]})
         supplied = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.PATIENT_PROFILE], profile), shared))
-        client = FakeLLMClient([ModelTurn(tool_calls=[call(), search_call()]), chat_final(refs=[
-            {"tool_call_id": "search_1", "evidence_index": 0}])])
+        client = FakeLLMClient([ModelTurn(tool_calls=[call(), search_call()]), chat_final(selected=[True,False])])
         result = ChatExecutionV1(client, lambda context: supplied)(
             CONTEXT, prepare_chat_input(CONTEXT, "Synthetic question"))
         self.assertEqual(result.execution.status, "completed")

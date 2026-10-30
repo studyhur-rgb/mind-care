@@ -2,7 +2,7 @@
 import json
 from typing import Protocol, Sequence
 
-from .outputs import FeedAnswerV2, FinalOutputModel
+from .outputs import ChatDraft, FeedAnswerV2, FinalOutputModel
 from .feed_candidates import build_feed_decision_policy
 from .schemas import AgentContext, Message
 from .tools.contracts import EvidencePackage
@@ -25,20 +25,22 @@ def build_structured_output_policy(output_model: FinalOutputModel) -> Message:
     policy = """최종 답변은 아래 JSON Schema를 따르는 단일 JSON object로 반환한다.
 Tool 선택/추가 호출은 기존 방식으로 계속하고, Tool Call이 없는 마지막 text만 JSON으로 작성한다.
 markdown fence, 숨겨진 reasoning, UI 디자인, disclaimer, follow_up 필드는 만들지 않는다.
-source_ref/citation_refs의 tool_call_id는 성공한 search_evidence의 function_call_output.call_id이며
-data.evidence의 0-based index만 사용한다. 다른 Tool/실패한 검색/없는 근거를 참조하지 않는다.
-PMID/DOI/URL/실제 논문 제목/journal/발행일/DB ID/북마크/read_minutes/evidence_level을
-metadata 필드로 생성하지 않는다. 서버가 출처 원문에서 붙인다.
+최종 text는 ChatDraft의 answer와 selected만 출력한다. selected는 현재 untrusted_chat_candidates의
+각 후보를 인용할지 나타내는 Boolean 배열이며 후보 순서와 길이에 정확히 대응한다.
+직접 답변도 현재 후보 수만큼 false를 작성한다. 검색 전/정상 0건에는 selected=[]이다.
+Provider Call ID, evidence_index, citation_refs, PMID, DOI, URL, DB UUID와 출처 metadata는 출력하지 않는다.
+원본 참조와 metadata는 서버가 보존하고 최종 ChatAnswerV1 및 sources에 결합한다.
+잘못된 선택 배열을 추측하여 보정하거나 인용만 지우고 연구 주장을 성공 처리하지 않는다.
 relevance_score는 검색 유사도이며 근거의 질이나 의학적 확신도가 아니다.
 new_research와 guideline은 출처의 evidence_type대로 구분하며 임의 승격하지 않는다.
 근거 없는 citation을 만들지 않고, 빈 검색을 효과 없음이나 안전함으로 해석하지 않는다.
 환자 기록에 없는 사실을 사실처럼 추가하지 않는다.
-Chat citation_refs가 비어 있어도 된다. answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다.
+Chat은 인용 없이도 답할 수 있다. answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다.
 citation_refs만 출처 연결의 기준이며 Frontend는 서버가 해석한 sources를 별도 출처 영역에 표시한다.
 서버 참조 검증은 문장과 근거의 의학적 일치까지 보장하지 않는다.
 """
     return Message(role="system", kind="policy", content=policy + json.dumps(
-        output_model.model_json_schema(), ensure_ascii=False, allow_nan=False))
+        ChatDraft.model_json_schema(), ensure_ascii=False, allow_nan=False))
 
 
 class PromptBuilder(Protocol):

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from .._execution import RequestTimeout, request_deadline
 from ..agent_loop_runner import AgentLoopRunner
+from ..evidence import EvidenceStore
 from .. import outputs as output_models
 from ..outputs import (ChatAnswerV1, EvidenceReference, FeedAnswerV2, FeedContentItemV2, PaperDetailContentV1,
                        StructuredAgentResult, resolve_evidence_references, validate_final_output)
@@ -28,6 +29,10 @@ def ref(identifier="search_1", index=0):
 def chat(refs=None):
     return {"schema_version": "1", "response_type": "chat", "answer": "[FAKE] 공개 설명입니다.",
             "citation_refs": [] if refs is None else refs}
+
+
+def draft(selected=()):
+    return {"answer": "[FAKE] 공개 설명입니다.", "selected": list(selected)}
 
 
 def feed_item(identifier="search_1", index=0):
@@ -376,7 +381,7 @@ class StructuredWorkflowTests(TestCase):
                          "total_tool_calls", "called_tools", "errors"})
 
     def test_direct_chat_and_final_answer_are_consistent(self):
-        result, client = self.run_output(chat())
+        result, client = self.run_output(draft([]))
         self.assertEqual(result.execution.status, "completed")
         self.assertIsInstance(result.output, ChatAnswerV1)
         self.assertEqual(result.execution.final_answer, result.output.answer)
@@ -388,7 +393,7 @@ class StructuredWorkflowTests(TestCase):
             StructuredAgentResult.model_validate(payload)
 
     def test_chat_with_search_copies_authoritative_metadata(self):
-        result, client = self.run_output(chat([ref()]), preceding=[self.search()])
+        result, client = self.run_output(draft([True]), preceding=[self.search()])
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.execution.total_tool_calls, 1)
         self.assertEqual(result.sources[0].pmid, "FAKE-PMID")
@@ -410,12 +415,12 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual(result.sources, [])
 
     def test_multiple_search_calls_are_not_confused(self):
-        result, _ = self.run_output(chat([ref("search_2"), ref("search_1")]),
+        result, _ = self.run_output(draft([True, True]),
                                     preceding=[tool_turn(
                                         call(ToolName.SEARCH_EVIDENCE, {"query": "first"}, identifier="search_1"),
                                         call(ToolName.SEARCH_EVIDENCE, {"query": "second"}, identifier="search_2"))])
         self.assertEqual(result.execution.status, "completed")
-        self.assertEqual([source.source_ref.tool_call_id for source in result.sources], ["search_2", "search_1"])
+        self.assertEqual([source.source_ref.tool_call_id for source in result.sources], ["search_1", "search_2"])
 
     def test_structured_policy_precedes_user_and_preserves_builder_messages(self):
         class CustomBuilder(DefaultPromptBuilder):
@@ -426,7 +431,7 @@ class StructuredWorkflowTests(TestCase):
                 return messages
         for builder in (DefaultPromptBuilder(), CustomBuilder("CUSTOM POLICY")):
             with self.subTest(builder=type(builder).__name__):
-                result, client = self.run_output(chat([ref()]), preceding=[self.search()], prompt_builder=builder)
+                result, client = self.run_output(draft([True]), preceding=[self.search()], prompt_builder=builder)
                 self.assertEqual(result.execution.status, "completed")
                 expected = builder.build_initial_messages("[FAKE] 합성 질문", CONTEXT)
                 for messages, _ in client.requests:
@@ -436,17 +441,17 @@ class StructuredWorkflowTests(TestCase):
                     self.assertEqual([message.kind for message in initial[:4]],
                                      ["policy", "agent_context", "policy", "user_input"])
                     self.assertEqual(initial[:2] + initial[3:], expected)
-                    self.assertIn('"const": "chat"', initial[2].content)
+                    self.assertIn('"title": "ChatDraft"', initial[2].content)
 
     def test_structured_chat_policy_uses_separate_sources_without_inline_numbers(self):
-        result, client = self.run_output(chat([ref()]), preceding=[self.search()])
+        result, client = self.run_output(draft([True]), preceding=[self.search()])
         self.assertEqual(result.execution.status, "completed")
         policy = client.requests[0][0][2].content
         self.assertIn("answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다", policy)
         self.assertIn("citation_refs만 출처 연결의 기준", policy)
         self.assertIn("별도 출처 영역", policy)
         self.assertNotIn("1-based", policy)
-        self.assertEqual(result.execution.final_answer, chat()["answer"])
+        self.assertEqual(result.execution.final_answer, draft([])["answer"])
         self.assertEqual(result.sources[0].source_ref, result.output.citation_refs[0])
 
     def test_multiple_search_rounds_preserve_full_tool_evidence_without_aggregate(self):
@@ -457,7 +462,7 @@ class StructuredWorkflowTests(TestCase):
                                           lambda context, args: packages[args.query]),))
         preceding = [tool_turn(call(ToolName.SEARCH_EVIDENCE, {"query": "first"}, identifier="search_1")),
                      tool_turn(call(ToolName.SEARCH_EVIDENCE, {"query": "second"}, identifier="search_2"))]
-        for model, payload in ((ChatAnswerV1, chat([ref("search_2", 1), ref("search_1")])),
+        for model, payload in ((ChatAnswerV1, draft([True, False, True])),
                                (FeedAnswerV2, feed_draft(2))):
             with self.subTest(model=model.__name__):
                 builder = DefaultPromptBuilder()
@@ -471,11 +476,11 @@ class StructuredWorkflowTests(TestCase):
                 aggregate.assert_not_called()
                 self.assertEqual(result.execution.status, "completed")
                 self.assertEqual([source.title for source in result.sources],
-                                 ["[FAKE] second index 1", "[FAKE] first"] if model is ChatAnswerV1
+                                 ["[FAKE] first", "[FAKE] second index 1"] if model is ChatAnswerV1
                                  else ["[FAKE] first", "[FAKE] second"])
                 for index, (messages, _) in enumerate(client.requests):
                     projections = [message for message in messages if message.kind == "evidence"]
-                    self.assertEqual(len(projections), 0 if model is ChatAnswerV1 or index == 0 else 1)
+                    self.assertEqual(len(projections), 0 if index == 0 else 1)
                     tools = [message for message in messages if message.type == "function_call_output"]
                     self.assertEqual([message.call_id for message in tools],
                                      ["search_1", "search_2"][:index])
@@ -483,7 +488,7 @@ class StructuredWorkflowTests(TestCase):
                         envelope = json.loads(message.content)
                         self.assertTrue(envelope["success"])
                         if model is ChatAnswerV1:
-                            self.assertEqual(envelope["data"], packages[query].model_dump(mode="json"))
+                            self.assertEqual(envelope["data"]["returned_evidence_count"], len(packages[query].evidence))
                         else:
                             self.assertNotIn("evidence", envelope["data"])
                     if model is FeedAnswerV2 and index > 0:
@@ -491,7 +496,7 @@ class StructuredWorkflowTests(TestCase):
                 final_messages = client.requests[-1][0]
                 self.assertEqual([message.role or message.type for message in final_messages],
                                  ["system", "system", "system", "user", "provider_output", "function_call_output", "provider_output", "function_call_output"]
-                                 + (["user"] if model is FeedAnswerV2 else []))
+                                 + ["user"])
                 self.assertEqual([message.provider_output["call_id"] for message in final_messages if message.type == "provider_output" and message.provider_output["type"] == "function_call"],
                                  ["search_1", "search_2"])
 
@@ -516,7 +521,7 @@ class StructuredWorkflowTests(TestCase):
                          [json.loads(message.content)["data"] for message in tools])
 
     def test_references_do_not_survive_between_requests_on_same_engine(self):
-        payload = json.dumps(chat([ref()]))
+        payload = json.dumps(draft([True]))
         engine = AgentLoopRunner(FakeLLMClient([self.search(), ModelTurn(text=payload),
                                                  ModelTurn(text=payload)]), fake_registry())
         first = engine.run_structured("synthetic", CONTEXT, output_model=ChatAnswerV1)
@@ -542,11 +547,11 @@ class StructuredWorkflowTests(TestCase):
     def test_failed_other_tool_and_unknown_calls_cannot_be_cited(self):
         failing_registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
             lambda context, args: None),))
-        cases = [(chat([ref("missing")]), [], fake_registry()),
-                 (chat([ref("profile")]), [tool_turn(call(identifier="profile"))], fake_registry()),
-                 (chat([ref()]), [self.search()], failing_registry),
+        cases = [(draft([True]), [], fake_registry()),
+                 (draft([True]), [tool_turn(call(identifier="profile"))], fake_registry()),
+                 (draft([True]), [self.search()], failing_registry),
                  (feed_draft(), [self.search()], failing_registry),
-                 (chat([ref(index=1)]), [self.search()], fake_registry())]
+                 (draft([False, True]), [self.search()], fake_registry())]
         for payload, preceding, registry in cases:
             model = FeedAnswerV2 if "decisions" in payload else ChatAnswerV1
             result, _ = self.run_output(payload, model, preceding, registry)
@@ -558,8 +563,8 @@ class StructuredWorkflowTests(TestCase):
             self.assertEqual(result.sources, [])
 
     def test_malformed_and_wrong_type_are_sanitized_without_retry(self):
-        for text in ("{PRIVATE malformed", json.dumps(feed(0)), json.dumps({**chat(), "answer": " "})):
-            client = FakeLLMClient([ModelTurn(text=text), ModelTurn(text=json.dumps(chat()))])
+        for text in ("{PRIVATE malformed", json.dumps(feed(0)), json.dumps({**draft([]), "answer": " "})):
+            client = FakeLLMClient([ModelTurn(text=text), ModelTurn(text=json.dumps(draft([])))])
             result = AgentLoopRunner(client, fake_registry()).run_structured("synthetic", CONTEXT,
                                                                             output_model=ChatAnswerV1)
             self.assertEqual(result.execution.status, "invalid_response")
@@ -578,13 +583,13 @@ class StructuredWorkflowTests(TestCase):
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
             lambda context, args: package(attack)),))
         builder = DefaultPromptBuilder("SERVER POLICY")
-        result, client = self.run_output(chat([ref()]), preceding=[self.search()], registry=registry,
+        result, client = self.run_output(draft([True]), preceding=[self.search()], registry=registry,
                                          prompt_builder=builder)
         self.assertEqual(result.execution.status, "completed")
         messages = client.requests[-1][0]
         policies = [message.content for message in messages if message.role == "system"]
         self.assertEqual(policies[0], "SERVER POLICY")
-        self.assertTrue(any('"const": "chat"' in policy for policy in policies))
+        self.assertTrue(any('"title": "ChatDraft"' in policy for policy in policies))
         self.assertTrue(all(attack not in policy for policy in policies))
         self.assertTrue(any(message.type == "function_call_output" and message.call_id == "search_1" for message in messages))
 
@@ -601,15 +606,16 @@ class StructuredWorkflowTests(TestCase):
 
     def test_structured_validation_obeys_request_deadline(self):
         release, finished = Event(), Event()
+        original = EvidenceStore.finalize_chat
         def slow_validation(*args):
             try:
                 release.wait(2)
-                return validate_final_output(*args)
+                return original(*args)
             finally:
                 finished.set()
         try:
-            with patch("app.ai.agent.agent_loop_runner.validate_final_output", side_effect=slow_validation):
-                result, _ = self.run_output(chat(), request_timeout_seconds=0.05)
+            with patch("app.ai.agent.evidence.EvidenceStore.finalize_chat", autospec=True, side_effect=slow_validation):
+                result, _ = self.run_output(draft([]), request_timeout_seconds=0.05)
             self.assertEqual(result.execution.status, "failed")
             self.assertEqual(result.execution.errors[-1].code, "request_timeout")
             self.assertIsNone(result.output)
@@ -620,7 +626,7 @@ class StructuredWorkflowTests(TestCase):
         self.assertTrue(finished.wait(1))
 
     def test_result_validation_failure_drops_content_and_sources(self):
-        client = FakeLLMClient([self.search(), ModelTurn(text=json.dumps(chat([ref()])))])
+        client = FakeLLMClient([self.search(), ModelTurn(text=json.dumps(draft([True])))])
         engine = AgentLoopRunner(client, fake_registry())
         calls = []
         def factory(**kwargs):
@@ -650,11 +656,11 @@ class StructuredWorkflowTests(TestCase):
                         finally:
                             finished.set()
                     if fail_timeout_metadata and len(statuses) == 2:
-                        return StructuredAgentResult(**{**kwargs, "output": chat()})
+                        return StructuredAgentResult(**{**kwargs, "output": draft([])})
                     return StructuredAgentResult(**kwargs)
                 try:
                     with patch("app.ai.agent.agent_loop_runner.StructuredAgentResult", side_effect=factory):
-                        result, _ = self.run_output(chat([ref()]), preceding=[self.search()],
+                        result, _ = self.run_output(draft([True]), preceding=[self.search()],
                                                     request_timeout_seconds=0.1)
                     self.assertTrue(started.is_set())
                     self.assertEqual(result.execution.status, "failed")
@@ -675,7 +681,7 @@ class StructuredWorkflowTests(TestCase):
                 raise RequestTimeout("expired during final validation")
             return StructuredAgentResult(**kwargs)
         with patch("app.ai.agent.agent_loop_runner.StructuredAgentResult", side_effect=factory):
-            result, _ = self.run_output(chat())
+            result, _ = self.run_output(draft([]))
         self.assertEqual(result.execution.status, "failed")
         self.assertEqual(result.execution.errors[-1].code, "request_timeout")
         self.assertIsNone(result.output)

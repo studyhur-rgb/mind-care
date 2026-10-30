@@ -98,7 +98,7 @@ class ResponsesTests(unittest.TestCase):
         for index,body in enumerate(wire):
             projections=[i for i in body['input'] if isinstance(i.get('content'), str) and i['content'].startswith('{') and json.loads(i['content']).get('context_type') == 'untrusted_feed_candidates']
             self.assertEqual(len(projections),int(index>0))
-            if projections:self.assertEqual(json.loads(projections[0]['content'])['candidate_revision'],index)
+            if projections:self.assertNotIn('candidate_revision',json.loads(projections[0]['content']))
             self.assertEqual(sum(i.get('type')=='reasoning' for i in body['input']),index)
             self.assertNotIn('feed-rag:',json.dumps(body['input']))
         self.assertEqual([s.pmid for s in result.sources],['query-1','query-2'])
@@ -208,7 +208,7 @@ class ResponsesTests(unittest.TestCase):
                 issued.extend(c['call_id'] for c in batch)
                 return httpx.Response(200,json=response(batch))
             return httpx.Response(200,json=response_fixture({'text':json.dumps({
-                'schema_version':'1','response_type':'chat','answer':'Synthetic','citation_refs':[]})}))
+                'answer':'Synthetic','selected':[False]*6})}))
         def handler(context,args):
             executed.append(args.query)
             return package([args.query])

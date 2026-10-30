@@ -111,7 +111,7 @@ class FeedDecisionPolicyTests(unittest.TestCase):
         pools = self.first_pools()
         pools['patient sleep intervention in MCI'] = package(['new-0', 'new-1', 'new-2', 'patient-0'])
         result, client, reached = self.run_feed([search(['patient', 'family', 'general'], 'first'),
-            search(['patient sleep intervention in MCI'], 'next', 1, (0,)),
+            search(['patient sleep intervention in MCI'], 'next', 10, (0,)),
             ModelTurn(text=json.dumps(decisions(9, (0, 5))))], pools)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual((len(client.requests), result.execution.total_tool_calls), (3, 4))
@@ -129,7 +129,7 @@ class FeedDecisionPolicyTests(unittest.TestCase):
     def test_nine_empty_searches_allow_final_zero_and_reject_fourth_round(self):
         for extra_round in (False, True):
             with self.subTest(extra_round=extra_round):
-                turns = [search([f'r{r}-{i}' for i in range(3)], f'provider-{r}', r if r else None) for r in range(3)]
+                turns = [search([f'r{r}-{i}' for i in range(3)], f'provider-{r}', 0 if r else None) for r in range(3)]
                 turns.append(search(['extra'], 'fourth', 3) if extra_round else ModelTurn(text=json.dumps(decisions(0))))
                 pools = {f'r{r}-{i}': package([]) for r in range(3) for i in range(3)}
                 result, client, reached = self.run_feed(turns, pools)

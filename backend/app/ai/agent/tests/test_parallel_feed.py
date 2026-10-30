@@ -206,7 +206,7 @@ class ParallelFeedTests(unittest.TestCase):
         for call_id, pmids in [('A',[None,'same','a','b','c','d']), ('B',['same','x','y']), ('C',['z'])]:
             source[call_id] = package(pmids)
             table.add(call_id, source[call_id])
-        result, refs = table.finalize(json.dumps(decisions(8, range(5))), source)
+        result, refs = table.finalize(json.dumps(decisions(8, range(5))), table.snapshot)
         self.assertEqual([s.pmid for s in refs], ['same','z','a','x','b'])
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in result.items],
                          [('A',1),('C',0),('A',2),('B',1),('A',3)])

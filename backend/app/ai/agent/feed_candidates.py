@@ -1,17 +1,17 @@
 """Request-local Feed decisions; original evidence identity stays on the server."""
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictInt, model_validator
+from pydantic import Field, model_validator
 
 from ..retrieval.evidence import LEVEL, to_grade
-from .outputs import (Category, ContentText, EvidenceReference, FeedAnswerV2, FeedContentItemV2,
-                      ResolvedEvidence, _json_object, _reject_constant, resolve_evidence_references)
-from .schemas import AgentModel, Message, ToolOutcome
-from .tools.contracts import EvidenceItem, EvidencePackage
+from .outputs import (Category, ContentText, FeedAnswerV2, FeedContentItemV2,
+                      ResolvedEvidence, _json_object, _reject_constant)
+from .schemas import AgentModel, Message
+from .evidence import EvidenceCandidate as FeedCandidate, EvidenceSnapshot, EvidenceStore
+from .tools.contracts import EvidencePackage
 
 MAX_FEED_REVIEW_CANDIDATES = 10
 MAX_FEED_RETAINED_CANDIDATES = 5
@@ -87,21 +87,13 @@ class FeedDecisionDraft(AgentModel):
                               Field(discriminator="include")]] = Field(max_length=MAX_FEED_REVIEW_CANDIDATES)
 
 
-class RetainedFeedCandidate(AgentModel):
-    candidate_index: Annotated[StrictInt, Field(ge=0, lt=MAX_FEED_REVIEW_CANDIDATES)]
-    personal_reason: ContentText = Field(max_length=1000)
-    category: Category
-
-
-class FeedReview(AgentModel):
-    candidate_revision: Annotated[StrictInt, Field(ge=1)]
-    retain: list[RetainedFeedCandidate] = Field(max_length=MAX_FEED_RETAINED_CANDIDATES)
+class FeedReview(FeedDecisionDraft):
+    """One positional decision per candidate from the server-owned snapshot."""
 
     @model_validator(mode="after")
-    def unique_indices(self):
-        indices = [item.candidate_index for item in self.retain]
-        if len(indices) != len(set(indices)):
-            raise ValueError("Repeated retained candidate index")
+    def retained_limit(self):
+        if sum(decision.include for decision in self.decisions) > MAX_FEED_RETAINED_CANDIDATES:
+            raise ValueError("Too many retained candidates")
         return self
 
 
@@ -111,21 +103,12 @@ class FeedDecisionError(ValueError):
         super().__init__(code)  # Fixed diagnostic only; no Provider/evidence/profile text.
 
 
-@dataclass(frozen=True)
-class FeedCandidate:
-    tool_call_id: str
-    evidence_index: int
-    evidence: EvidenceItem
-
-    @property
-    def source_ref(self) -> EvidenceReference:
-        return EvidenceReference(tool_call_id=self.tool_call_id, evidence_index=self.evidence_index)
-
-
 class FeedCandidates:
-    """Request-owned original pools and a deterministic, latest <=15 review projection, with <=5 retained/recommended."""
+    """Feed selection over Store-owned occurrences: <=10 review, <=5 retained/recommended."""
 
-    def __init__(self, *, previously_recommended_pmids: frozenset[str] = frozenset()):
+    def __init__(self, store: EvidenceStore | None = None, *, previously_recommended_pmids: frozenset[str] = frozenset()):
+        self.store = store if store is not None else EvidenceStore()
+        self.snapshot = self.store.current("feed")
         self._previously_recommended_pmids = frozenset(previously_recommended_pmids)
         self._items: list[FeedCandidate] = []
         self._pools: list[list[FeedCandidate]] = []
@@ -133,10 +116,10 @@ class FeedCandidates:
         self.successful_searches = 0
         self.failed_searches = 0
         self.last_search = None
-        self.revision = 0
+        self._review_ready = False
         self._reviewed: dict[str, FeedCandidate] = {}
         self._retained: list[FeedCandidate] = []
-        self._retained_decisions: dict[tuple[str, int], RetainedFeedCandidate] = {}
+        self._retained_decisions: dict[tuple[str, int], IncludedFeedDecision] = {}
         self._round_start = 0
 
     def record_search(self, success: bool, returned: int = 0, added: int = 0) -> None:
@@ -170,12 +153,8 @@ class FeedCandidates:
             "llm_candidate_count": self.count,
         }
 
-    def add(self, call_id: str, package: EvidencePackage) -> None:
-        checked = EvidencePackage.model_validate(package.model_dump(warnings=False))
-        pool = []
-        for index, evidence in enumerate(checked.evidence):
-            ref = EvidenceReference(tool_call_id=call_id, evidence_index=index)
-            pool.append(FeedCandidate(ref.tool_call_id, ref.evidence_index, evidence.model_copy(deep=True)))
+    def add(self, call_id: str, package: EvidencePackage, *, provider_call_id: str | None = None) -> None:
+        pool = list(self.store.add_search_result(call_id, package, provider_call_id=provider_call_id))
         self._pools.append(pool)
         self._select()
 
@@ -202,63 +181,62 @@ class FeedCandidates:
             if len(selected) == MAX_FEED_REVIEW_CANDIDATES:
                 break
         self._items = selected
+        self.snapshot = self.store.snapshot("feed", [candidate.key for candidate in selected])
 
     def finish_round(self) -> None:
         # The latest projection and prior reviewed snapshots together preserve
         # exactly which original occurrence was shown, even for discarded PMID duplicates.
         self._reviewed.update({candidate.evidence.pmid: candidate for candidate in self._items})
-        self.revision += 1
+        self._review_ready = True
 
-    def _validate_sources(self, evidence_by_call: Mapping[str, EvidencePackage]) -> None:
+    def _validate_snapshot(self, snapshot: EvidenceSnapshot) -> None:
         try:
-            for candidate in self._items:
-                ref = EvidenceReference.model_validate(candidate.source_ref.model_dump(warnings=False))
-                original = evidence_by_call[ref.tool_call_id]
-                checked = EvidencePackage.model_validate(original.model_dump(warnings=False))
-                if checked.evidence[ref.evidence_index] != candidate.evidence:
-                    raise ValueError("Candidate snapshot mismatch")
-        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            self.store.validate_snapshot(snapshot)
+            if snapshot is not self.snapshot or snapshot.keys != tuple(candidate.key for candidate in self._items):
+                raise ValueError("Unexpected candidate snapshot")
+        except ValueError:
             raise FeedDecisionError("candidate_source_mismatch") from None
 
-    def apply_review(self, review: FeedReview | None,
-                     evidence_by_call: Mapping[str, EvidencePackage]) -> None:
-        """Called on a staged copy before I/O. Never accept an unseen identity."""
-        if self.revision == 0:
+    def apply_review(self, review: FeedReview | None, snapshot: EvidenceSnapshot) -> None:
+        """Bind this Provider turn to the exact snapshot sent by the server."""
+        self._validate_snapshot(snapshot)
+        if not self._review_ready:
             if review is not None:
                 raise FeedDecisionError("invalid_feed_review")
             return
-        if review is None or review.candidate_revision != self.revision:
+        try:
+            review = FeedReview.model_validate(review.model_dump(warnings=False)) if review is not None else None
+        except (ValueError, TypeError, AttributeError):
+            raise FeedDecisionError("invalid_feed_review") from None
+        if review is None or len(review.decisions) != self.count:
             raise FeedDecisionError("invalid_feed_review")
-        if any(item.candidate_index >= self.count for item in review.retain):
-            raise FeedDecisionError("invalid_feed_review")
-        self._validate_sources(evidence_by_call)
-        # Preserve server order even if the model lists retention entries out of order.
-        retained = sorted(review.retain, key=lambda item: item.candidate_index)
-        self._retained = [self._items[item.candidate_index] for item in retained]
-        self._retained_decisions = {(candidate.tool_call_id, candidate.evidence_index): item.model_copy(deep=True)
-                                   for candidate, item in zip(self._retained, retained, strict=True)}
+        retained = [(candidate, decision) for candidate, decision in zip(self._items, review.decisions, strict=True)
+                    if decision.include]
+        self._retained = [candidate for candidate, _ in retained]
+        self._retained_decisions = {(candidate.tool_call_id, candidate.evidence_index): decision.model_copy(deep=True)
+                                   for candidate, decision in retained}
         self._round_start = len(self._pools)
         self._select()
 
     def message(self, remaining: int = 9, *, model_tool_calls: int | None = None,
                 rounds_used: int = 0, rounds_remaining: int = 3) -> Message:
+        self._validate_snapshot(self.snapshot)
         # One latest projection is appended to the current request, never history.
         # Field removal is not a free-text PII sanitizer. All excerpts remain untrusted.
         rows = []
-        for index, candidate in enumerate(self._items):
+        for candidate in self._items:
             retained = self._retained_decisions.get((candidate.tool_call_id, candidate.evidence_index))
             if retained is not None:
-                rows.append({"candidate_index": index, "status": "retained",
+                rows.append({"status": "retained",
                              "personal_reason": retained.personal_reason, "category": retained.category})
                 continue
             item = candidate.evidence
             excerpt = item.ai_summary if item.ai_summary and item.ai_summary.strip() else item.abstract
-            rows.append({"candidate_index": index, "status": "new", "title": item.title[:300], "study_type": (item.study_type or "")[:80],
+            rows.append({"status": "new", "title": item.title[:300], "study_type": (item.study_type or "")[:80],
                          "derived_evidence_grade": _derived_grade(candidate),
                          "evidence_excerpt": (excerpt or "")[:1200]})
         return Message(role="user", kind="evidence", content=json.dumps({
             "context_type": "untrusted_feed_candidates",
-            "candidate_revision": self.revision,
             "reviewed_count": len(self._reviewed.keys() | {c.evidence.pmid for c in self._items}), "retained_count": len(self._retained),
             "search_progress": {
                 "phase": ("not_started" if not (self.successful_searches + self.failed_searches)
@@ -276,7 +254,7 @@ class FeedCandidates:
             "candidates": rows,
         }, ensure_ascii=False, allow_nan=False))
 
-    def finalize(self, text: str, evidence_by_call: Mapping[str, EvidencePackage]
+    def finalize(self, text: str, snapshot: EvidenceSnapshot
                  ) -> tuple[FeedAnswerV2, list[ResolvedEvidence]]:
         try:
             if not isinstance(text, str) or len(text) > 65536:
@@ -294,15 +272,14 @@ class FeedCandidates:
         if sum(decision.include for decision in draft.decisions) > MAX_FEED_RECOMMENDATIONS:
             raise FeedDecisionError("too_many_selected")
         try:
-            # Revalidate the original mapping even for excluded candidates. Identity
-            # and full evidence must still agree with the captured candidate snapshot.
-            self._validate_sources(evidence_by_call)
-            items = [FeedContentItemV2(source_ref=candidate.source_ref.model_copy(deep=True),
-                        personal_reason=decision.personal_reason, category=decision.category)
-                     for candidate, decision in zip(self._items, draft.decisions, strict=True)
-                     if decision.include]
+            # Validate every occurrence, including excluded candidates, against
+            # the immutable source authority and the exact presented snapshot.
+            self._validate_snapshot(snapshot)
+            refs = self.store.select(snapshot, [decision.include for decision in draft.decisions])
+            items = [FeedContentItemV2(source_ref=ref, personal_reason=decision.personal_reason, category=decision.category)
+                     for ref, decision in zip(refs, [row for row in draft.decisions if row.include], strict=True)]
             output = FeedAnswerV2(schema_version="2", response_type="feed", items=items)
-            return output, resolve_evidence_references(output, evidence_by_call)
+            return output, self.store.resolve(refs)
         except (ValueError, TypeError, KeyError, IndexError, AttributeError):
             raise FeedDecisionError("candidate_source_mismatch") from None
 
@@ -314,9 +291,9 @@ Tool 선택/추가 호출은 기존 방식으로 계속한다. 검증용 재호�
 search_progress는 서버의 실제 검색 상태다. 검색 전 후보 0건을 최종 빈 결과로 판단하지 않는다.
 평가는 개별 연구 적합성 → 추천 조합의 유용성 → 추가 검색 가치와 종료 타당성 순으로 수행한다.
 추가 검색은 선택이며 완전히 동일한 query 반복이나 예산을 채우기 위한 검색을 하지 않는다.
-추가 검색 Tool arguments에는 review={candidate_revision:현재 버전, retain:[{candidate_index,personal_reason,category}]}를 넣는다.
+추가 검색 Tool arguments에는 review={decisions:[현재 후보 각각의 include 및 유지할 경우 personal_reason/category]}를 넣는다.
 검토 후보는 유지 후보를 포함해 최대 10편, 다음 라운드 유지 후보와 최종 추천은 각각 최대 5편이다.
-retain은 현재 목록 중 실제로 유지할 후보를 최대 5편만 나열한다. 모두 제외하면 빈 배열이다. 잘못된 index/중복/다른 버전은 거부한다.
+review.decisions는 현재 목록 순서와 개수에 정확히 대응한다. 유지하려면 include=true와 이유/category, 제외하려면 include=false만 작성한다. 유지는 최대 5편이다. 버전은 서버가 관리하며 출력하지 않는다.
 추가 검색이 같은 turn에 여러 Tool Call이면 review는 한 곳에 넣거나 동일한 값으로 반복한다.
 검토한 PMID는 신규 후보에서 제외된다. 유지 후보만 다시 포함할 수 있고 미검토 기존 검색 결과도 재활용한다.
 retained 행은 이전 판단 이유/category와 위치만 제공한다. 원문은 반복 전달하지 않는다.
