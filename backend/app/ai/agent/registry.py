@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from .schemas import AgentContext
 from .tools import contracts as c
 from .tools.medications import PATIENT_MEDICATIONS_DATA_POLICY
+from .tools.medical_visits import PATIENT_MEDICAL_VISITS_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -15,6 +16,7 @@ class ToolName(str, Enum):
     RECENT_CARE_LOGS = "get_recent_care_logs"
     SEARCH_EVIDENCE = "search_evidence"
     PATIENT_MEDICATIONS = "get_patient_medications"
+    PATIENT_MEDICAL_VISITS = "get_patient_medical_visits"
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,12 @@ TOOL_CONTRACTS = {
                      "note는 다양한 복약 관련 관찰이 포함될 수 있는 자유 서술이다.",
                      c.PatientMedicationsInput, c.PatientMedicationsOutput,
                      data_policy=PATIENT_MEDICATIONS_DATA_POLICY, patient_scoped=True),
+        ToolContract(ToolName.PATIENT_MEDICAL_VISITS,
+                     "서버가 선택한 환자의 등록된 병원 진료 이력과 미방문·향후 방문 예정 기록을 읽기 전용으로 조회한다. "
+                     "방문 날짜, 병원·진료과, 진료 내용, 검사 요약, 약물 변경 메모, 의사 전달사항 및 후속 계획을 확인할 수 있다. "
+                     "미방문 상태는 예약 확정이나 결석을 의미하지 않는다.",
+                     c.PatientMedicalVisitsInput, c.PatientMedicalVisitsOutput,
+                     data_policy=PATIENT_MEDICAL_VISITS_DATA_POLICY, patient_scoped=True),
     )
 }
 

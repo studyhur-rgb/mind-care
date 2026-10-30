@@ -1998,3 +1998,41 @@ Fake/Mock 테스트는 정책이 전달되고 종료/추가 검색 경로가 허
 사용자 Windows 로컬 VS Code/FastAPI 환경에서 MCI·수면·인지기능, 배회·넘어짐·돌봄 지원의 두 사례를 반복 비교한다.
 0편 조기 종료 빈도, 환자/보호자 연구 대상 일치, 조합의 정보 중복·주요 목적 충족, retained 재평가와 추천 사유의 사실성,
 검색/LLM 호출 수·후보 수·입출력 토큰·응답시간(기존 120초 제한)을 함께 확인한다. 검색/추천 편수 증가만으로 성공을 판정하지 않는다.
+
+
+## get_patient_medical_visits — Contract-only
+
+`tools/medical_visits.py`는 `PatientMedicalVisitsInput`, `MedicalVisitItem`,
+`PatientMedicalVisitsOutput`, `PATIENT_MEDICAL_VISITS_DATA_POLICY`를 소유한다.
+canonical `ToolName.PATIENT_MEDICAL_VISITS`와 Contract만 선언하며 운영 Handler·Adapter는 없다.
+`production_registry()`의 실행 정의에 자동 추가되지 않는다. 합성 Handler는 테스트 모드에서만 사용한다.
+
+입력은 `status="completed"`, `start_date=None`, `end_date=None`, `limit=5`다.
+날짜 양 끝 포함, 동일 날짜 허용, 역전 거부, 과거·미래 허용이며 limit은 엄격한 정수 1~20이다.
+환자와 KST 기준일은 서버가 결정하므로 환자/사용자 ID나 기준일 인자를 받지 않는다.
+
+| status | 조회·정렬 계약 (향후 Handler 책임) |
+|---|---|
+| completed | 방문 완료 등록 (`is_visited=true`), 방문일 내림차순 |
+| upcoming | KST 오늘 포함 이후의 미방문 등록, 사용자 날짜 범위와 교집합, 방문일 오름차순 |
+| unvisited | 과거·오늘·미래의 모든 미방문 등록, 방문일 내림차순 |
+| all | 방문 여부와 무관한 등록 기록, 방문일 내림차순 |
+
+출력은 `visits`(최대 20건) 하나다. 각 항목은 필수 `visit_date`, strict Boolean `is_visited`와
+nullable 텍스트 `hospital_name`, `department`, `visit_reason`, `diagnosis`, `treatment_content`,
+`test_summary`, `medication_change`, `doctor_note`, `follow_up_plan`, `visit_content`를 가진다.
+선택 텍스트의 기본값은 None이며 `id/patient_id/created_at/updated_at`과 전체 건수는 노출하지 않는다.
+빈 목록은 조회 조건에서 반환된 기록 없음이며 전체 방문·치료 부재가 아니다.
+
+정책은 공식 의무기록과 등록된 서술, 현재 임상 상태와 과거 진료, 약물 변경 메모와 실제 복약,
+후속 계획과 확정 예약을 구분한다. 미방문을 예약 확정·취소·결석으로 단정하지 않는다.
+오늘 날짜만으로 현재 시각 이후의 일정임을 판단하지 않는다. 과거 `visit_content`에는 진료 내용
+전체가 있을 수 있으므로 임의 분해하거나 다른 필드와 중복 계산하지 않는다. 자유 서술은 비신뢰 데이터다.
+`ToolContract.data_policy`로 연결되며 실행·출력 검증 성공 후 trusted system 메시지로 요청당 한 번만
+전달한다. 초기 프롬프트·Tool Description에 상세 정책을 넣지 않으며 실패 시 새로 전달하지 않는다.
+
+후속 Handler·Adapter는 권한/환자 Scope, KST 기준일, 상태별 필터·정렬과 실제 limit을 보장해야 한다.
+현재 `list_medical_visits()`는 방문일 내림차순 후 LIMIT이므로 upcoming 결과를 뒤집기만 하면
+가까운 일정이 누락될 수 있다. LIMIT 전 가장 가까운 날짜 우선 선택 전략이 필요하다.
+DB DTO의 실제 nullable 필드 매핑 누락이 None으로 숨지 않는지 검증하고, `visits`의 ToolTrace
+result_count 지원도 연동 단계에서 확인한다. 이번 단계에서는 DB·Executor를 변경하지 않는다.
