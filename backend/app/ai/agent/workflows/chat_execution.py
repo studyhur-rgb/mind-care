@@ -6,7 +6,7 @@ from .._execution import positive_seconds
 from ..agent_loop_runner import AgentLoopRunner
 from ..clients.base import LLMClient
 from ..outputs import ChatAnswerV1, StructuredAgentResult
-from ..registry import ToolName, ToolRegistry
+from ..registry import ToolRegistry
 from ..schemas import AgentContext
 from .chat_context_prepare import _validated_context
 from .chat_prompts import ChatPromptBuilder
@@ -94,8 +94,7 @@ class ChatExecutionV1:
             # reused factory registry cannot share its mutable mapping with a run.
             specs = tuple(supplied.get(name) for name in supplied.names())
             registry = ToolRegistry(specs, mode=supplied.mode)
-            if context.patient_id is None and any(registry.get(name.value) is not None for name in (
-                    ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS)):
+            if context.patient_id is None and any(spec.contract.patient_scoped for spec in specs):
                 raise ValueError("Patient Tools require a selected patient")
             runner = AgentLoopRunner(self.client, registry, prompt_builder=ChatPromptBuilder(),
                 max_tool_rounds=5, max_total_tool_calls=10,

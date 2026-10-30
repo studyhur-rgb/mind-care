@@ -392,7 +392,7 @@ class FeedArchitectureTests(unittest.TestCase):
         self.assertEqual(signature.parameters["max_total_tool_calls"].default, 10)
         self.assertEqual(production_registry().definitions(), [])
         self.assertEqual({name.value for name in ToolName},
-                         {"get_patient_profile", "get_recent_care_logs", "search_evidence"})
+                         {"get_patient_profile", "get_recent_care_logs", "search_evidence", "get_patient_medications"})
         self.assertNotIn("workflow_type", inspect.getsource(agent_loop_runner))
 
     def test_test_query_hook_precedes_each_search_and_rejection_skips_handler(self):

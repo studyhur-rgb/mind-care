@@ -7,12 +7,14 @@ from pydantic import BaseModel
 
 from .schemas import AgentContext
 from .tools import contracts as c
+from .tools.medications import PATIENT_MEDICATIONS_DATA_POLICY
 
 
 class ToolName(str, Enum):
     PATIENT_PROFILE = "get_patient_profile"
     RECENT_CARE_LOGS = "get_recent_care_logs"
     SEARCH_EVIDENCE = "search_evidence"
+    PATIENT_MEDICATIONS = "get_patient_medications"
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,8 @@ class ToolContract:
     description: str
     input_model: type[BaseModel]
     output_model: type[BaseModel]
+    data_policy: str = ""
+    patient_scoped: bool = False
 
     def definition(self) -> dict[str, Any]:
         return {"type": "function", "strict": False,
@@ -35,17 +39,24 @@ TOOL_CONTRACTS = {
         ToolContract(ToolName.PATIENT_PROFILE,
                      "개인화 context가 필요할 때 trusted server Context가 지정한 환자의 저장된 기본 프로필 snapshot을 읽기 전용으로 조회한다. "
                      "저장된 profile 값만 사용하며 최근 기록·임상 평가·복약 정보를 추론하거나 결합하지 않는다.",
-                     c.PatientProfileInput, c.PatientProfileOutput),
+                     c.PatientProfileInput, c.PatientProfileOutput, patient_scoped=True),
         ToolContract(ToolName.RECENT_CARE_LOGS,
                      "개인화 context가 필요할 때 trusted server Context가 지정한 현재 환자에 대해 간병인이 저장한 최근 patient_care 돌봄 기록을 읽기 전용으로 조회한다. "
                      "반환된 기록은 간병인의 관찰·서술이며 임상적으로 검증된 사실이나 진단으로 간주하지 않는다.",
-                     c.RecentCareLogsInput, c.RecentCareLogsOutput),
+                     c.RecentCareLogsInput, c.RecentCareLogsOutput, patient_scoped=True),
         ToolContract(ToolName.SEARCH_EVIDENCE,
                      "연구·의학적 근거가 필요할 때 현재 corpus에서 치매/MCI 및 인지건강 관련 연구 근거 후보를 검색한다. "
                      "관련 의학·연구 용어를 사용한 영어 query를 가능한 한 우선 작성하도록 권장한다. "
                      "한국어 query도 허용하지만 영어보다 우선순위가 낮으며, 영어로 검색 의도를 정확하게 표현하기 어려울 때 사용할 수 있다. "
                      "검색 결과나 relevance_score만으로 의료 주장 진위 또는 evidence level을 판단하지 않는다.",
                      c.EvidenceSearchInput, c.EvidencePackage),
+        ToolContract(ToolName.PATIENT_MEDICATIONS,
+                     "서버가 선택한 환자의 등록된 복약 정보를 읽기 전용으로 조회한다. "
+                     "약품명, 1회 복용량, 복용 주기, 현재 복용 또는 중단 상태, 복용 시작·종료일 및 관련 자유 메모를 반환한다. "
+                     "is_taking은 약물의 등록된 복용 상태로, 개별 날짜의 복용 완료 여부가 아니다. "
+                     "note는 다양한 복약 관련 관찰이 포함될 수 있는 자유 서술이다.",
+                     c.PatientMedicationsInput, c.PatientMedicationsOutput,
+                     data_policy=PATIENT_MEDICATIONS_DATA_POLICY, patient_scoped=True),
     )
 }
 
@@ -103,5 +114,5 @@ class ToolRegistry:
 
 
 def production_registry() -> ToolRegistry:
-    """Backing 서비스가 없는 3개 Tool은 현재 운영에 노출하지 않는다."""
+    """Backing 서비스가 없는 Tool은 현재 운영에 노출하지 않는다."""
     return ToolRegistry()

@@ -15,7 +15,7 @@ from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvid
                       StructuredAgentResult, validate_final_output)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
 from .registry import ToolName, ToolRegistry
-from .schemas import AgentContext, AgentError, AgentResult, AgentState, ModelTurn, ToolOutcome, ToolTrace
+from .schemas import AgentContext, AgentError, AgentResult, AgentState, Message, ModelTurn, ToolOutcome, ToolTrace
 from .tools.contracts import EvidencePackage
 
 
@@ -112,6 +112,7 @@ class AgentLoopRunner:
         structured_output: ChatAnswerV1 | FeedAnswerV2 | None = None
         sources: list[ResolvedEvidence] = []
         seen_ids: set[str] = set()
+        delivered_policy_tools: set[str] = set()
         deadline = monotonic() + self.request_timeout_seconds
         inherited = request_deadline.get()
         token = request_deadline.set(min(deadline, inherited) if inherited is not None else deadline)
@@ -320,6 +321,15 @@ class AgentLoopRunner:
                 stage = "conversation_error"
                 bounded_call(lambda: conversation.append_turn(turn, outcomes,
                     include_search_references=output_model is ChatAnswerV1))
+                # Only server-owned Contract text becomes policy. Keep the entire
+                # Provider output/result bundle contiguous and in original order.
+                for outcome in outcomes:
+                    if outcome.success and outcome.tool_name not in delivered_policy_tools:
+                        spec = self.registry.get(outcome.tool_name)
+                        if spec is not None and spec.contract.data_policy:
+                            conversation.items.append(Message(role="system", kind="policy",
+                                content=spec.contract.data_policy))
+                            delivered_policy_tools.add(outcome.tool_name)
         except RequestTimeout:
             state.final_answer = None
             error = AgentError(code="request_timeout", message="Agent 전체 실행 시간이 초과되었습니다.")

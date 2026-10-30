@@ -1,10 +1,11 @@
-"""3개 Tool의 Agent 전용 입력/출력. 확장 필드는 DB 필드가 아니다."""
+"""Tool의 Agent 전용 입력/출력. 확장 필드는 DB 필드가 아니다."""
 from datetime import date, timezone
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, JsonValue, StrictInt, field_validator, model_validator
 
 from ..schemas import AgentModel
+from .medications import MedicationItem, PatientMedicationsInput, PatientMedicationsOutput
 
 
 class PatientProfileInput(AgentModel):

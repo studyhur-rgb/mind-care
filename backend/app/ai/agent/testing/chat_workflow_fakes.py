@@ -55,7 +55,7 @@ class FakeChatDependencies:
         self.factory_contexts.append(context)
         specs = []
         for name, handler in self.handlers.items():
-            if context.patient_id is None and name in (ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS):
+            if context.patient_id is None and TOOL_CONTRACTS[name].patient_scoped:
                 continue
             def recorded(context, args, name=name, handler=handler):
                 self.tool_events.append((name.value, context, deepcopy(args), len(self.client.requests)))

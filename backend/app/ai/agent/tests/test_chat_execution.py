@@ -112,7 +112,7 @@ class ChatExecutionTests(unittest.TestCase):
                 self.execute(deps, context)
                 runners.append(run.call_args.args[0])
         names = lambda index: [d["name"] for d in deps.client.requests[index][1]]
-        self.assertEqual(names(0), [n.value for n in ToolName])
+        self.assertEqual(names(0), [ToolName.PATIENT_PROFILE.value, ToolName.RECENT_CARE_LOGS.value, ToolName.SEARCH_EVIDENCE.value])
         self.assertEqual(names(1), [ToolName.SEARCH_EVIDENCE.value])
         self.assertEqual(names(2), names(0))
         self.assertEqual(deps.factory_contexts, list(contexts))
