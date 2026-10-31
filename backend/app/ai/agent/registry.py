@@ -10,6 +10,7 @@ from .tools import contracts as c
 from .tools.medications import PATIENT_MEDICATIONS_DATA_POLICY
 from .tools.medical_visits import PATIENT_MEDICAL_VISITS_DATA_POLICY
 from .tools.assessments import PATIENT_ASSESSMENTS_DATA_POLICY
+from .tools.patient_profile import PATIENT_PROFILE_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -41,9 +42,11 @@ class ToolContract:
 TOOL_CONTRACTS = {
     contract.name: contract for contract in (
         ToolContract(ToolName.PATIENT_PROFILE,
-                     "개인화 context가 필요할 때 trusted server Context가 지정한 환자의 저장된 기본 프로필 snapshot을 읽기 전용으로 조회한다. "
-                     "저장된 profile 값만 사용하며 최근 기록·임상 평가·복약 정보를 추론하거나 결합하지 않는다.",
-                     c.PatientProfileInput, c.PatientProfileOutput, patient_scoped=True),
+                     "서버가 선택한 환자의 앱에 저장된 기본 프로필을 읽기 전용으로 조회한다. "
+                     "표시 이름·별칭, 등록된 치매 단계, 진단일, 증상 태그 및 관심 치료·관리 분야를 반환한다. "
+                     "최근 돌봄 기록, 검사·평가 이력, 복약 상태는 이 Tool의 조회 대상이 아니다.",
+                     c.PatientProfileInput, c.PatientProfileOutput,
+                     data_policy=PATIENT_PROFILE_DATA_POLICY, patient_scoped=True),
         ToolContract(ToolName.RECENT_CARE_LOGS,
                      "개인화 context가 필요할 때 trusted server Context가 지정한 현재 환자에 대해 간병인이 저장한 최근 patient_care 돌봄 기록을 읽기 전용으로 조회한다. "
                      "반환된 기록은 간병인의 관찰·서술이며 임상적으로 검증된 사실이나 진단으로 간주하지 않는다.",

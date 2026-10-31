@@ -303,9 +303,23 @@ class BoundaryTests(unittest.TestCase):
         AgentLoopRunner(client, fake_registry()).run(original, CONTEXT)
         messages = client.requests[-1][0]
         self.assertEqual([m.content for m in messages if m.kind == "user_input"], [original])
-        self.assertEqual([m.role or m.type for m in messages], ["system", "system", "user", "provider_output", "function_call_output"])
-        self.assertEqual(json.loads(messages[1].content)["trusted_agent_context"]["patient_id"], str(CONTEXT.patient_id))
-        self.assertNotIn("patient_id", json.loads(messages[-1].content)["data"])
+        policy = TOOL_CONTRACTS[ToolName.PATIENT_PROFILE].data_policy
+        policies = [m for m in messages if m.role == "system" and m.kind == "policy" and m.content == policy]
+        self.assertEqual(len(policies), 1)
+        self.assertTrue(all(m.content != policy for m in client.requests[0][0]))
+        self.assertEqual([m.role or m.type for m in messages if m not in policies],
+                         ["system", "system", "user", "provider_output", "function_call_output"])
+        contexts = [m for m in messages if m.kind == "agent_context"]
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(json.loads(contexts[0].content)["trusted_agent_context"]["patient_id"], str(CONTEXT.patient_id))
+        calls = [m for m in messages if m.type == "provider_output" and m.provider_output.get("type") == "function_call"]
+        outputs = [m for m in messages if m.type == "function_call_output"]
+        self.assertEqual([m.provider_output["call_id"] for m in calls], ["call_1"])
+        self.assertEqual([m.call_id for m in outputs], ["call_1"])
+        self.assertLess(messages.index(calls[0]), messages.index(outputs[0]))
+        self.assertLess(messages.index(outputs[0]), messages.index(policies[0]))
+        self.assertTrue(json.loads(outputs[0].content)["success"])
+        self.assertNotIn("patient_id", json.loads(outputs[0].content)["data"])
 
     def test_custom_prompt_builder_used_without_loop_runner_changes(self):
         class Replacement(DefaultPromptBuilder):
