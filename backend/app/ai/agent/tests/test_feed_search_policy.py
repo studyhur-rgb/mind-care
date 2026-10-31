@@ -8,6 +8,7 @@ from openai import OpenAI
 from ..clients.base import GenerationRequest
 from ..clients.openai_client import OpenAIClient
 from ..schemas import Message, ModelTurn
+from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from ..workflows.feed_execution import FeedExecutionV1
 from . import test_feed_candidates as candidates
 from .test_feed_candidates import decisions, package, review_turn
@@ -153,7 +154,13 @@ class FeedSearchPolicyTests(unittest.TestCase):
                         self.assertEqual(state["candidate_count"], int(pmids == ["A"]))
                         self.assertEqual([m.provider_output["call_id"] for m in messages if m.type == "provider_output" and m.provider_output["type"] == "function_call"],
                                          [m.call_id for m in messages if m.type == "function_call_output"])
-                        self.assertEqual(messages[-2].type, "function_call_output")
+                        results = [m for m in messages if m.type == "function_call_output"]
+                        data_policies = [m for m in messages if m.content == SEARCH_EVIDENCE_DATA_POLICY]
+                        self.assertEqual(len(data_policies), 1)
+                        self.assertEqual(data_policies[0].role, "system")
+                        self.assertGreater(messages.index(data_policies[0]), messages.index(results[0]))
+                        self.assertLess(messages.index(data_policies[0]), messages.index(projections[0]))
+                        self.assertTrue(all(messages.index(m) < messages.index(projections[0]) for m in results))
                         self.assertEqual(messages[-1], projections[0])
                     if pmids == ["A"]:
                         self.assertEqual(result.sources[0].source_ref.tool_call_id, "opaque_0")

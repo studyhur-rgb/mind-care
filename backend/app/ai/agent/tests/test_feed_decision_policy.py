@@ -5,6 +5,7 @@ import unittest
 from ..feed_candidates import build_feed_decision_policy
 from ..schemas import ModelTurn
 from ..testing.fake_llm import FakeLLMClient
+from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from ..workflows.feed_execution import FeedExecutionV1
 from ..workflows.feed_prompts import FeedPromptBuilder
 from . import test_parallel_feed as parallel
@@ -54,11 +55,13 @@ class FeedDecisionPolicyTests(unittest.TestCase):
         for clause in ('연구 대상·목적·실제 결과와 Context의 연결',
                        'MCI 환자의 낮잠 증가만으로 보호자의 불면증 치료 연구',
                        '보호자 본인의 수면 문제나 지원 필요성이 실제 Context',
-                       '질환 단계·대상군·시설/지역사회', '차이가 있다고 일괄 제외하거나 미제공 상태를 추측하지 않는다',
+                       '대상군·단계·환경이 다르다는 이유만으로 일괄 제외하거나 미제공 상태를 추측하지 않는다',
                        '실제 연구 결과가 personal_reason을 뒷받침',
-                       '개입 연구라는 이유만으로 우선하거나 연관성 연구를 일괄 낮게 평가하지 않는다',
-                       '관찰 연구의 연관성을 인과관계로 표현하지 않는다'):
+                       '개입 연구라는 이유만으로 우선하거나 연관성 연구를 일괄 낮게 평가하지 않는다'):
             self.assertIn(clause, policy)
+        for clause in ('질환 단계, 연구 환경', '차이가 있다면 적용 한계를 구분한다',
+                       '관찰연구의 연관성을 인과관계나 치료 효과 입증으로 바꾸지 않는다'):
+            self.assertIn(clause, SEARCH_EVIDENCE_DATA_POLICY)
 
     def test_combination_compares_information_value_without_forcing_diversity(self):
         policy = build_feed_decision_policy().content

@@ -19,6 +19,7 @@ from ..schemas import AgentResult, ModelTurn
 from ..testing.fake_llm import FakeLLMClient
 from ..testing.fake_tools import fake_registry
 from ..tools.contracts import EvidenceItem, EvidencePackage
+from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from .test_workflows import CONTEXT, call, tool_turn
 
 
@@ -494,7 +495,12 @@ class StructuredWorkflowTests(TestCase):
                     if model is FeedAnswerV2 and index > 0:
                         self.assertEqual(json.loads(projections[0].content)["candidate_count"], index)
                 final_messages = client.requests[-1][0]
-                self.assertEqual([message.role or message.type for message in final_messages],
+                policies = [m for m in final_messages if m.content == SEARCH_EVIDENCE_DATA_POLICY]
+                self.assertEqual(len(policies), 1)
+                self.assertEqual(policies[0].role, "system")
+                self.assertGreater(final_messages.index(policies[0]), final_messages.index(tools[0]))
+                self.assertLess(final_messages.index(policies[0]), final_messages.index(tools[1]))
+                self.assertEqual([message.role or message.type for message in final_messages if message not in policies],
                                  ["system", "system", "system", "user", "provider_output", "function_call_output", "provider_output", "function_call_output"]
                                  + ["user"])
                 self.assertEqual([message.provider_output["call_id"] for message in final_messages if message.type == "provider_output" and message.provider_output["type"] == "function_call"],
@@ -512,10 +518,15 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual([message.role for message in client.requests[0][0]], ["system", "system", "user"])
         self.assertEqual(client.requests[0][0][-1].content, "  원문\n")
         final_messages = client.requests[-1][0]
-        self.assertEqual([message.role or message.type for message in final_messages],
+        policies = [m for m in final_messages if m.content == SEARCH_EVIDENCE_DATA_POLICY]
+        self.assertEqual(len(policies), 1)
+        self.assertEqual(policies[0].role, "system")
+        self.assertEqual([message.role or message.type for message in final_messages if message not in policies],
                          ["system", "system", "user", "provider_output", "function_call_output", "provider_output", "function_call_output", "user"])
         tools = [message for message in final_messages if message.type == "function_call_output"]
         self.assertEqual([message.call_id for message in tools], ["search_1", "search_2"])
+        self.assertGreater(final_messages.index(policies[0]), final_messages.index(tools[0]))
+        self.assertLess(final_messages.index(policies[0]), final_messages.index(tools[1]))
         self.assertEqual(final_messages[-1].kind, "evidence")
         self.assertEqual(json.loads(final_messages[-1].content)["evidence_packages"],
                          [json.loads(message.content)["data"] for message in tools])

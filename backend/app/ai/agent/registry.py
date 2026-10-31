@@ -12,6 +12,7 @@ from .tools.medical_visits import PATIENT_MEDICAL_VISITS_DATA_POLICY
 from .tools.assessments import PATIENT_ASSESSMENTS_DATA_POLICY
 from .tools.patient_profile import PATIENT_PROFILE_DATA_POLICY
 from .tools.recent_care_logs import RECENT_CARE_LOGS_DATA_POLICY
+from .tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -58,9 +59,8 @@ TOOL_CONTRACTS = {
         ToolContract(ToolName.SEARCH_EVIDENCE,
                      "연구·의학적 근거가 필요할 때 현재 corpus에서 치매/MCI 및 인지건강 관련 연구 근거 후보를 검색한다. "
                      "관련 의학·연구 용어를 사용한 영어 query를 가능한 한 우선 작성하도록 권장한다. "
-                     "한국어 query도 허용하지만 영어보다 우선순위가 낮으며, 영어로 검색 의도를 정확하게 표현하기 어려울 때 사용할 수 있다. "
-                     "검색 결과나 relevance_score만으로 의료 주장 진위 또는 evidence level을 판단하지 않는다.",
-                     c.EvidenceSearchInput, c.EvidencePackage),
+                     "한국어 query도 허용하지만 영어보다 우선순위가 낮으며, 영어로 검색 의도를 정확하게 표현하기 어려울 때 사용할 수 있다.",
+                     c.EvidenceSearchInput, c.EvidencePackage, data_policy=SEARCH_EVIDENCE_DATA_POLICY),
         ToolContract(ToolName.PATIENT_MEDICATIONS,
                      "서버가 선택한 환자의 등록된 복약 정보를 읽기 전용으로 조회한다. "
                      "약품명, 1회 복용량, 복용 주기, 현재 복용 또는 중단 상태, 복용 시작·종료일 및 관련 자유 메모를 반환한다. "
