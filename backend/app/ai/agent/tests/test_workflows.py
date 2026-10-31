@@ -412,9 +412,10 @@ class BoundaryTests(unittest.TestCase):
                   ToolName.SEARCH_EVIDENCE: {"query": "dementia sleep"}}
         self.assertEqual({name.value for name in ToolName},
                          {"get_patient_profile", "get_recent_care_logs", "search_evidence", "get_patient_medications",
-                          "get_patient_medical_visits", "get_patient_assessments"})
+                          "get_patient_medical_visits", "get_patient_assessments", "get_patient_safety_events"})
         self.assertEqual(set(TOOL_CONTRACTS), set(inputs) | {
-            ToolName.PATIENT_MEDICATIONS, ToolName.PATIENT_MEDICAL_VISITS, ToolName.PATIENT_ASSESSMENTS})
+            ToolName.PATIENT_MEDICATIONS, ToolName.PATIENT_MEDICAL_VISITS, ToolName.PATIENT_ASSESSMENTS,
+            ToolName.PATIENT_SAFETY_EVENTS})
         self.assertEqual({item["name"] for item in fake_registry().definitions()},
                          {name.value for name in inputs})
         executor = ToolExecutor(fake_registry())

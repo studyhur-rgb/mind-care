@@ -8,6 +8,7 @@ from ..schemas import AgentModel
 from .medications import MedicationItem, PatientMedicationsInput, PatientMedicationsOutput
 from .medical_visits import MedicalVisitItem, PatientMedicalVisitsInput, PatientMedicalVisitsOutput
 from .assessments import AssessmentItem, PatientAssessmentsInput, PatientAssessmentsOutput
+from .safety_events import SafetyEventItem, SafetyEventsPeriod, PatientSafetyEventsInput, PatientSafetyEventsOutput
 
 
 class PatientProfileInput(AgentModel):

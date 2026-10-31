@@ -2085,3 +2085,43 @@ result_detail은 비신뢰 원문이며 평가 주체·날짜·null·빈 목록�
 원본 점수·날짜·서술은 보존한다. 확인 불가한 메타데이터는 추정하지 않는다. nullable 기본값 때문에
 실제 매핑 누락이 숨지 않는지도 검증한다. 점수와 서술이 상충해도 임의 보정하지 않는다.
 ToolTrace.result_count의 assessments 지원은 실제 Handler 연결 시 검토하며 이번에는 Executor를 변경하지 않는다.
+
+## 환자 날짜별 안전 체크 Tool 계약
+
+`get_patient_safety_events`는 canonical Contract 선언만 제공한다. Handler·Adapter·DB 조회와
+운영 Registry 연결은 아직 이 작업의 범위가 아니며, 미연결 상태 자체를 결함으로 취급하지 않는다.
+`patient_scoped=True`를 기존 Executor가 사용한다. 환자/사용자 ID와 기준 날짜는 LLM 입력으로 받지 않는다.
+
+| mode | 허용 기간 인자 | 의미 |
+|---|---|---|
+| recent_days (기본) | days: StrictInt 1~31, 생략 시 30 | 서버 KST 오늘을 포함한 N개 달력 날짜. N×24시간이 아니다. |
+| relative_month | months_ago: 필수 StrictInt ≥0 | 0=이번 달, 1=지난달, 2=지지난달. 해당 월 한 개 전체다. |
+| specific_month | year: 필수 StrictInt 1~9999, month: 필수 StrictInt 1~12 | 지정한 연월 전체다. |
+
+모드별 다른 기간 인자는 null이나 기본값으로 명시해도 거부한다. 필요한 인자의 명시적 null도
+거부하며 빈 입력은 최근 30일이다. 단일 object JSON Schema와 필드 설명을 사용하고,
+조건부 필수/금지 조합은 Pydantic Validator가 최종 검증한다. 내부 미사용 필드는 None이며
+입력을 재직렬화할 때는 `model_dump(exclude_none=True)`로 활성 인자만 전달한다.
+월 경과 수에는 임의 보관기간 상한을 두지 않는다. 현재 날짜를 읽거나 월초·월말·윤년을 계산하지 않는다.
+
+출력은 필수 `period.start_date/end_date`(양 끝 포함, 1~31일)와 필수 `events`(최대 31행)다.
+각 행은 `event_date`, 세 필수 StrictBool `has_fall/has_wandering/has_missing`,
+필수 nullable `note`만 포함한다. note=null과 매핑 누락을 구분하며 원문을 재작성하지 않는다.
+날짜 최신순·중복 없음·반환 기간 내 날짜를 검증하고 모두 false인 행과 정상 빈 목록을 허용한다.
+id/patient_id/created_at, limit, total_count, has_more, 페이지네이션은 제공하지 않는다.
+
+이는 개별 사고 로그가 아니라 날짜별 체크다. true는 횟수가 아니고 false와 행 부재는 다르다.
+과거 실종 체크로 현재 실종·발견·해결을 확정하지 않는다. Boolean과 메모가 상충해도 각각 보존한다.
+체크된 날짜 수·날짜별 차이·메모는 설명할 수 있지만 사고 횟수·임상적 위험도·질환 진행을 만들지 않는다.
+이번 달 전체가 조회 조건이어도 아직 지나지 않은 날짜의 관찰·기록 완료를 뜻하지 않는다.
+전용 Data Policy는 기존 ToolContract 경로에서 출력 검증 성공 후에만 system 메시지로 한 번 전달된다.
+초기 Definition에는 기능과 Input Schema만 있고, 별도의 Workflow 후속 Hook은 추가하지 않는다.
+
+향후 Handler·Adapter가 KST 기준 날짜, 모드별 기간, 월 경계·연도 변경·윤년,
+계산된 연도의 표현 가능 범위(1~9999), 미래 월 요청 거부 및 실제 요청 기간 일치를 보장한다.
+현재 월은 월 전체를 조건으로 사용하되 미래 날짜의 기록을 생성하거나 false로 채우지 않는다.
+권한·원본 환자 확인 후 공개 필드만 투영하고, 모두 false인 행도 포함하여 기간 내 모든 DB 행을
+누락 없이 조회해야 한다. 최대 31행이라는 DTO 검증만으로 조회의 완전성을 증명할 수 없다.
+조회 실패를 events=[]로 숨기지 않는다. 자유 메모의 개인정보 자동 제거는 이 계약이 보장하지 않는다.
+대표 성공·빈 결과·매핑 누락은 MockTransport로 확인하며, 실제 달력 계산·DB·권한 및
+LLM의 사용자 표현→mode 선택 평가는 각각 향후 구현/실제 모델 평가에서 수행한다.

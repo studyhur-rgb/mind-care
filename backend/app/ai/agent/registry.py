@@ -13,6 +13,7 @@ from .tools.assessments import PATIENT_ASSESSMENTS_DATA_POLICY
 from .tools.patient_profile import PATIENT_PROFILE_DATA_POLICY
 from .tools.recent_care_logs import RECENT_CARE_LOGS_DATA_POLICY
 from .tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
+from .tools.safety_events import PATIENT_SAFETY_EVENTS_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -22,6 +23,7 @@ class ToolName(str, Enum):
     PATIENT_MEDICATIONS = "get_patient_medications"
     PATIENT_MEDICAL_VISITS = "get_patient_medical_visits"
     PATIENT_ASSESSMENTS = "get_patient_assessments"
+    PATIENT_SAFETY_EVENTS = "get_patient_safety_events"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,13 @@ TOOL_CONTRACTS = {
                      "등록된 점수와 평가 결과만으로 현재 임상 상태나 질환 진행을 확정하지 않는다.",
                      c.PatientAssessmentsInput, c.PatientAssessmentsOutput,
                      data_policy=PATIENT_ASSESSMENTS_DATA_POLICY, patient_scoped=True),
+        ToolContract(ToolName.PATIENT_SAFETY_EVENTS,
+                     "서버가 선택한 환자의 앱에 저장된 날짜별 낙상·배회·실종 체크 기록을 읽기 전용으로 조회한다. "
+                     "최근 N개 달력 날짜, 몇 개월 전의 달력 월 한 개(0=이번 달), 지정한 연월 중 하나를 선택한다. "
+                     "기록 대상 날짜, 세 체크값과 상황 메모 및 실제 조회 기간을 반환하며 한 번에 최대 31개 날짜를 조회한다. "
+                     "실시간 위치나 현재 실종·발견·해결 상태를 조회하는 Tool은 아니다.",
+                     c.PatientSafetyEventsInput, c.PatientSafetyEventsOutput,
+                     data_policy=PATIENT_SAFETY_EVENTS_DATA_POLICY, patient_scoped=True),
     )
 }
 
