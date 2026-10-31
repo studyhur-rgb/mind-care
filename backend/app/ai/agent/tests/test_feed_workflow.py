@@ -337,7 +337,9 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
-        self.assertIn("일반적인 정보적 관련성", policy)
+        self.assertNotIn('personal_reason', policy)
+        post = '\n'.join(m.content for m in deps.client.requests[1][0] if m.role == 'system')
+        self.assertIn("일반적인 정보적 관련성", post)
         self.assertNotIn("근거/개인화 정보가 부족하면 items=[]", policy)
 
     def test_cold_start_empty_evidence_and_invalid_or_failed_citations(self):

@@ -20,6 +20,7 @@ from ..testing.fake_llm import FakeLLMClient
 from ..testing.fake_tools import fake_registry
 from ..tools.contracts import EvidenceItem, EvidencePackage
 from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_workflows import CONTEXT, call, tool_turn
 
 
@@ -367,6 +368,8 @@ class NestedResultValidationTests(TestCase):
 class StructuredWorkflowTests(TestCase):
     def run_output(self, payload, model=ChatAnswerV1, preceding=(), registry=None, **options):
         client = FakeLLMClient([*preceding, ModelTurn(text=json.dumps(payload, ensure_ascii=False))])
+        if model is FeedAnswerV2:
+            options.setdefault("prompt_builder", FeedPromptBuilder())
         engine = AgentLoopRunner(client, registry if registry is not None else fake_registry(), **options)
         return engine.run_structured("[FAKE] 합성 질문", CONTEXT, output_model=model), client
 
@@ -448,9 +451,9 @@ class StructuredWorkflowTests(TestCase):
         result, client = self.run_output(draft([True]), preceding=[self.search()])
         self.assertEqual(result.execution.status, "completed")
         policy = client.requests[0][0][2].content
-        self.assertIn("answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다", policy)
-        self.assertIn("citation_refs만 출처 연결의 기준", policy)
-        self.assertIn("별도 출처 영역", policy)
+        self.assertIn("answer 본문에 출처 번호를 임의로 생성하지 않는다", policy)
+        self.assertIn("원본 참조와 metadata는 서버가 보존", policy)
+        self.assertIn("최종 ChatAnswerV1 및 sources에 결합한다", policy)
         self.assertNotIn("1-based", policy)
         self.assertEqual(result.execution.final_answer, draft([])["answer"])
         self.assertEqual(result.sources[0].source_ref, result.output.citation_refs[0])
@@ -466,7 +469,7 @@ class StructuredWorkflowTests(TestCase):
         for model, payload in ((ChatAnswerV1, draft([True, False, True])),
                                (FeedAnswerV2, feed_draft(2))):
             with self.subTest(model=model.__name__):
-                builder = DefaultPromptBuilder()
+                builder = FeedPromptBuilder() if model is FeedAnswerV2 else DefaultPromptBuilder()
                 model_preceding = preceding
                 if model is FeedAnswerV2:
                     from .test_feed_candidates import review_turn
@@ -500,8 +503,13 @@ class StructuredWorkflowTests(TestCase):
                 self.assertEqual(policies[0].role, "system")
                 self.assertGreater(final_messages.index(policies[0]), final_messages.index(tools[0]))
                 self.assertLess(final_messages.index(policies[0]), final_messages.index(tools[1]))
+                if model is FeedAnswerV2:
+                    workflow_policies = [m for m in final_messages if '"title": "FeedDecisionDraft"' in (m.content or '')]
+                    self.assertEqual(len(workflow_policies), 1)
+                    self.assertEqual(workflow_policies[0].role, "system")
                 self.assertEqual([message.role or message.type for message in final_messages if message not in policies],
-                                 ["system", "system", "system", "user", "provider_output", "function_call_output", "provider_output", "function_call_output"]
+                                 ["system"] * (2 if model is FeedAnswerV2 else 3)
+                                 + ["user", "provider_output", "function_call_output", "provider_output", "function_call_output"]
                                  + ["user"])
                 self.assertEqual([message.provider_output["call_id"] for message in final_messages if message.type == "provider_output" and message.provider_output["type"] == "function_call"],
                                  ["search_1", "search_2"])

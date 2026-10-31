@@ -25,6 +25,7 @@ from ..workflows.chat_context_prepare import prepare_chat_input
 from ..workflows.chat_execution import ChatExecutionV1, _finalize_chat_answer
 from ..workflows.chat_prompts import (
     CHAT_DATA_POLICY, CHAT_DIALOGUE_POLICY, CHAT_EVIDENCE_POLICY, CHAT_TOOL_POLICY,
+    CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY,
     ChatPromptBuilder,
 )
 from ..workflows.feed_execution import FeedExecutionV1
@@ -89,9 +90,13 @@ class ChatDialoguePolicyTests(unittest.TestCase):
                 self.assertIn(rule, CHAT_TOOL_POLICY)
 
     def test_evidence_and_data_scope_additions_keep_existing_boundaries(self):
-        for rule in ('untrusted_chat_candidates', 'Boolean 배열', '현재 untrusted_chat_candidates.candidate_count가 0일 때만 selected=[]', 'Tool 조회 실패',
-                     'Protocol', 'citation_refs와 별도의 sources'):
+        for rule in ('검색하지 않았다면', 'Tool 조회 실패', '정상 0건/데이터 부재로 가장하지 않는다',
+                     '가이드라인 검색을 모든 질문에 강제하지 않는다'):
             self.assertIn(rule, CHAT_EVIDENCE_POLICY)
+        for rule in ('untrusted_chat_candidates', 'Boolean 배열', 'candidate_count가 0일 때만 selected=[]',
+                     'Protocol', 'citation_refs와 별도의 sources'):
+            self.assertNotIn(rule, CHAT_EVIDENCE_POLICY)
+            self.assertIn(rule, CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY)
         for rule in ('현재 RAG 코퍼스', '관련 문헌 전체나 확정된 의학적 결론이 아니다',
                      '최신 연구 전체를 확인했다고 단정하지 않는다', '관찰연구', 'Protocol',
                      'new_research/guideline', 'pmid·doi·source_url', '값을 만들어 채우지 않는다'):
@@ -143,8 +148,9 @@ class ChatDialoguePolicyTests(unittest.TestCase):
             self.assertNotIn(feed_rule, chat)
         structured = build_structured_output_policy(ChatAnswerV1).content
         for rule in ('단일 JSON object', 'ChatDraft', 'selected',
-                     'citation_refs만 출처 연결의 기준', 'answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다'):
+                     '원본 참조와 metadata는 서버가 보존', 'answer 본문에 출처 번호를 임의로 생성하지 않는다'):
             self.assertIn(rule, structured)
+        self.assertIn('citation_refs와 별도의 sources로만 연결', CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY)
 
 
 class ChatSourcePolicyTests(unittest.TestCase):
@@ -427,10 +433,13 @@ class ChatSourcePolicyTests(unittest.TestCase):
 
     def test_chat_policy_separates_data_limits_research_interpretation_and_feed(self):
         text=ChatPromptBuilder().build_system_prompt(CONTEXT)
-        for required in ('selected','Boolean','서버가 원본에서 확정','Protocol','환자','보호자','null',
-                         '과거 평가','자유서술','비신뢰 데이터','조회 실패','현재 untrusted_chat_candidates.candidate_count가 0일 때만 selected=[]','Tool 없이 직접',
+        for required in ('환자','보호자','null',
+                         '과거 평가','자유서술','비신뢰 데이터','조회 실패','Tool 없이 직접',
                          '인증·소속 권한의 증거가 아니다'):
             self.assertIn(required,text)
+        self.assertNotIn(CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY, text)
+        self.assertIn('최신 candidate_count와 정확히 같은 길이의 Boolean 배열', CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY)
+        self.assertIn('원본에서 확정한 ChatAnswerV1', CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY)
         for moved in ('관찰연구의 연관성을 인과관계', '확인되지 않은 연구 대상·방법·결과',
                       'relevance_score', 'new_research/guideline'):
             self.assertNotIn(moved, text)

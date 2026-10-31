@@ -17,6 +17,7 @@ from ..workflows.chat_context_prepare import prepare_chat_input
 from ..workflows.chat_execution import ChatExecutionV1
 from ..workflows.feed import FeedWorkflow, FeedWorkflowError
 from ..workflows.feed_execution import FeedExecutionV1
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_feed_execution import final_turn, prepared_input, search_call
 from .test_search_evidence_adapter import package
 from .test_workflows import CONTEXT, call, envelopes
@@ -58,7 +59,7 @@ class SearchEvidenceIntegrationTests(TestCase):
              patch.object(rag, "search_similar", return_value=[hit]) as nearest, \
              patch.object(rag, "get_papers_by_ids", return_value=[paper]), \
              patch.object(rag, "search", wraps=rag.search) as search:
-            result = AgentLoopRunner(client, build_evidence_registry()).run_structured(
+            result = AgentLoopRunner(client, build_evidence_registry(), prompt_builder=FeedPromptBuilder()).run_structured(
                 "Synthetic request", self.context, output_model=FeedAnswerV2)
         self.assertEqual(result.execution.status, "completed")
         search.assert_called_once_with(query="Dementia sleep research", k=8)

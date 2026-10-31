@@ -25,17 +25,14 @@ def build_structured_output_policy(output_model: FinalOutputModel) -> Message:
     policy = """최종 답변은 아래 JSON Schema를 따르는 단일 JSON object로 반환한다.
 Tool 선택/추가 호출은 기존 방식으로 계속하고, Tool Call이 없는 마지막 text만 JSON으로 작성한다.
 markdown fence, 숨겨진 reasoning, UI 디자인, disclaimer, follow_up 필드는 만들지 않는다.
-최종 text는 ChatDraft의 answer와 selected만 출력한다. selected는 현재 untrusted_chat_candidates의
-각 후보를 인용할지 나타내는 Boolean 배열이며 후보 순서와 길이에 정확히 대응한다.
-직접 답변도 현재 후보 수만큼 false를 작성한다. 후보 목록이 아직 제공되지 않았거나 최신 untrusted_chat_candidates.candidate_count가 0일 때만 selected=[]이다.
+최종 text는 ChatDraft의 answer와 selected만 출력한다. selected는 인용할 검색 후보를 나타내는 Boolean 배열이다.
+후보 목록이 아직 제공되지 않았거나 최신 untrusted_chat_candidates.candidate_count가 0일 때만 selected=[]이다.
+검색 후보가 있으면 후속 판단 정책과 최신 후보 목록의 개수·순서를 따른다.
 Provider Call ID, evidence_index, citation_refs, PMID, DOI, URL, DB UUID와 출처 metadata는 출력하지 않는다.
-원본 참조와 metadata는 서버가 보존하고 최종 ChatAnswerV1 및 sources에 결합한다.
-잘못된 선택 배열을 추측하여 보정하거나 인용만 지우고 연구 주장을 성공 처리하지 않는다.
-근거 없는 citation을 만들지 않는다.
+원본 참조와 metadata는 서버가 보존하고 최종 ChatAnswerV1 및 sources에 결합한다. 근거 없는 citation을 만들지 않는다.
 환자 기록에 없는 사실을 사실처럼 추가하지 않는다.
-Chat은 인용 없이도 답할 수 있다. answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다.
-citation_refs만 출처 연결의 기준이며 Frontend는 서버가 해석한 sources를 별도 출처 영역에 표시한다.
-서버 참조 검증은 문장과 근거의 의학적 일치까지 보장하지 않는다.
+Chat은 Tool 없이도 인용 없이도 답할 수 있다. answer 본문에 출처 번호를 임의로 생성하지 않는다.
+사용자가 질문한 문자열, 정상적인 번호 목록·배열·수식은 인용 표식으로 오해하여 변형하지 않는다.
 """
     return Message(role="system", kind="policy", content=policy + json.dumps(
         ChatDraft.model_json_schema(), ensure_ascii=False, allow_nan=False))
@@ -48,6 +45,8 @@ class PromptBuilder(Protocol):
 
     def build_final_response_context(self, evidence: Sequence[EvidencePackage]) -> list[Message]: ...
 
+    def build_post_tool_success_policies(self, successful_tool_names: frozenset[str]) -> list[Message]: ...
+
 
 class DefaultPromptBuilder:
     def __init__(self, system_prompt: str = DEFAULT_SYSTEM_PROMPT):
@@ -55,6 +54,9 @@ class DefaultPromptBuilder:
 
     def build_system_prompt(self, context: AgentContext) -> str:
         return self.system_prompt
+
+    def build_post_tool_success_policies(self, successful_tool_names: frozenset[str]) -> list[Message]:
+        return []
 
     def build_initial_messages(self, user_input: str, context: AgentContext) -> list[Message]:
         return [

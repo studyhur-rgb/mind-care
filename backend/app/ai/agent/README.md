@@ -36,6 +36,17 @@ Chat Completions 호출·자동 폴백·암묵적 generation-options ContextVar�
   최종 JSON 검증을 계속 소유한다. Feed 후보 투영은 generation snapshot에만 붙이므로
   이전 후보 목록을 다음 요청에 중복 누적하지 않는다.
 
+`PromptBuilder.build_post_tool_success_policies(frozenset[str])`는 검증·반영이 완료된 요청별
+성공 Tool 이름만 받아 정적 Workflow System 정책을 반환한다. 검색 성공(정상 0건 포함) 후
+Chat은 질문 해결·추가 검색·누적 후보 인용 정책을, Feed는 기존 후보 평가 정책을 제공한다.
+Runner는 매 요청 스냅샷의 첫 user 메시지 앞에만 삽입하며 Conversation에는 누적하지 않는다.
+동적 후보·검색 진행 정보는 기존 Projection, Tool 데이터 해석은 기존 `ToolContract.data_policy`가
+각각 담당한다. DefaultPromptBuilder는 빈 목록을 반환하며 Hook이 없는 기존 Builder도 동작한다.
+Workflow 전용 후속 정책이 필요한 실행은 ChatPromptBuilder 또는 FeedPromptBuilder를 사용한다.
+`run_structured(output_model=FeedAnswerV2)`는 FeedPromptBuilder를 필수로 요구하며,
+기본/Hook 미구현/Chat Builder 조합은 LLM·Tool 실행 전에 ValueError 구성 오류로 거부한다.
+일반 `run()`과 Chat 구조화 실행에는 이 Feed 전용 제한을 적용하지 않는다.
+
 Provider 요청은 `store=False`, `include=["reasoning.encrypted_content"]`를 사용하며
 `previous_response_id`를 사용하지 않는다. reasoning 항목은 요청별 opaque continuation으로
 후속 호출에 전달하고, 공개 결과나 일반 로그에 노출하지 않는다. 특정 모델의 effort는
@@ -199,8 +210,9 @@ Tool/질문/Evidence는 비신뢰 데이터다.
 성공한 Chat 검색 결과는 원본을 EvidenceStore에 보존하고 건수/최신 후보 안내만 Tool 결과로 전달한다.
 최신 untrusted_chat_candidates와 ChatDraft.selected를 서버 snapshot으로 연결하여 참조를 생성한다.
 실패 결과는 인용 후보가 아니며 정상 0건은 성공한 빈 후보로 구분한다. Feed/legacy Tool 결과 형식은 유지한다.
-Chat 전용 Prompt는 관찰연구/Protocol/대상군/주체/불확실성 해석과 null/부분 조회/조회 실패의 의미를
-구분한다. 연구 유형을 Agent에서 일괄 제외하거나 Feed 후보·추천 정책을 복사하지 않는다.
+공통 검색 Data Policy가 연구 데이터 해석을 담당한다. Chat 후속 정책은 질문과 근거의 직접 관련성,
+추가 검색 실익, 상충 결과 및 누적 후보 선택을 다룬다. null/조회 실패의 공통 안전 규칙은 초기에 유지한다.
+연구 유형을 Agent에서 일괄 제외하거나 Feed 후보·추천 정책을 복사하지 않는다.
 최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
 응답의 임상적 정확성을 강제하는 검증은 아니다. 실제 Provider 의미적 동작은 아직 검증하지 않았다.
 

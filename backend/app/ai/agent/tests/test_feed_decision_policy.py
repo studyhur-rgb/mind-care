@@ -42,11 +42,15 @@ class FeedDecisionPolicyTests(unittest.TestCase):
 
     def test_initial_policy_prioritizes_evidence_sufficiency_over_minimal_search_count(self):
         policy = FeedPromptBuilder().build_system_prompt(CONTEXT)
+        final = build_feed_decision_policy().content
         for clause in ('검색 횟수 최소화 자체를 목표로 하지 않는다', '중요한 연구 목적의 충족 여부',
-                       '추가 검색의 기대 가치', '첫 라운드도 근거가 충분하면 종료',
-                       '후보가 10편이라는 사실만으로 충분함을 단정하지 않는다',
-                       '후보가 10편 미만이어도 충분하면 종료', '별도 평가/재생성 호출은 만들지 않는다'):
-            self.assertIn(clause, policy)
+                       '추가 검색 가치와 종료 타당성', '편수만으로 자동 종료/재검색하지 않는다',
+                       '이 평가는 기존 호출 안에서 수행', '의미적으로 유사한 검색은 허용한다'):
+            self.assertNotIn(clause, policy)
+            self.assertIn(clause, final)
+        self.assertIn('적합한 3~5편으로 주요 목적이 충족되면 첫 라운드도 종료 가능하다', final)
+        self.assertIn('1~2편도 추가 검색 실익이 낮으면 종료 가능하다', final)
+        self.assertIn('첫 검색을 반드시', policy)
         self.assertNotIn('일반적인 목표는 검색 생성 1회와 최종 판단 1회', policy)
         self.assertNotIn('decisions', policy)  # Post-search schema stays out of the planning policy.
 

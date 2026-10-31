@@ -64,6 +64,10 @@ class AgentLoopRunner:
         """명시적 opt-in. 기존 Client/Tool Loop로 실행하고 마지막 text만 검증한다."""
         if output_model not in (ChatAnswerV1, FeedAnswerV2):
             raise ValueError("Only ChatAnswerV1 and FeedAnswerV2 are supported")
+        if output_model is FeedAnswerV2:
+            from .workflows.feed_prompts import FeedPromptBuilder
+            if not isinstance(self.prompt_builder, FeedPromptBuilder):
+                raise ValueError("FeedAnswerV2 requires FeedPromptBuilder for its post-tool success policy")
         return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model,
                     previously_recommended_pmids=previously_recommended_pmids))
 
@@ -113,6 +117,7 @@ class AgentLoopRunner:
         sources: list[ResolvedEvidence] = []
         seen_ids: set[str] = set()
         delivered_policy_tools: set[str] = set()
+        successful_tool_names: set[str] = set()
         deadline = monotonic() + self.request_timeout_seconds
         inherited = request_deadline.get()
         token = request_deadline.set(min(deadline, inherited) if inherited is not None else deadline)
@@ -158,16 +163,21 @@ class AgentLoopRunner:
                 # 구조화 참조는 call ID가 있는 Tool Result만 사용한다. legacy의 근거 묶음은 유지한다.
                 messages = conversation.snapshot() + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence.packages())) if output_model is None else [])
+                # Static Workflow policy belongs to this request snapshot, never history.
+                # Builders implementing the older Protocol keep their no-hook behavior.
+                hook = getattr(self.prompt_builder, "build_post_tool_success_policies", None)
+                if successful_tool_names and hook is not None:
+                    policies = bounded_call(lambda: hook(frozenset(successful_tool_names)))
+                    if any(policy.type != "message" or policy.role != "system" or policy.kind != "policy"
+                           for policy in policies):
+                        raise ValueError("Workflow hook must return system policies")
+                    user_position = next((index for index, message in enumerate(messages)
+                                          if message.role == "user"), len(messages))
+                    messages[user_position:user_position] = policies
                 if feed_candidates is not None:
                     rounds_remaining = max(0, min(MAX_FEED_SEARCH_ROUNDS, self.max_tool_rounds) - state.tool_round)
                     remaining = max(0, min(MAX_FEED_SEARCHES, self.max_total_tool_calls) - state.total_tool_calls)
                     if feed_candidates.successful_searches:
-                        # Feed evaluation policy/projection belong to this request only,
-                        # after a successful search, never to persistent history.
-                        user_position = next((index for index, message in enumerate(messages)
-                                              if message.role == "user"), len(messages))
-                        messages.insert(user_position, bounded_call(
-                            lambda: build_structured_output_policy(output_model)))
                         messages.append(bounded_call(lambda: feed_candidates.message(
                             remaining, model_tool_calls=feed_model_calls,
                             rounds_used=state.tool_round, rounds_remaining=rounds_remaining)))
@@ -322,6 +332,7 @@ class AgentLoopRunner:
                 bounded_call(lambda: conversation.append_turn(turn, outcomes,
                     project_search_results=output_model is ChatAnswerV1,
                     evidence_call_ids=evidence.call_ids))
+                successful_tool_names.update(outcome.tool_name for outcome in outcomes if outcome.success)
                 # Only server-owned Contract text becomes policy. Keep the entire
                 # Provider output/result bundle contiguous and in original order.
                 for outcome in outcomes:

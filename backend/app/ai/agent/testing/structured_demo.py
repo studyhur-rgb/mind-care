@@ -5,6 +5,7 @@ from ..agent_loop_runner import AgentLoopRunner
 from ..outputs import ChatAnswerV1, ChatDraft, FeedAnswerV2
 from ..registry import ToolName
 from ..schemas import AgentContext, ModelTurn, ToolCall
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .fake_llm import FakeLLMClient
 from .fake_tools import fake_registry
 
@@ -21,7 +22,8 @@ def main():
                 if output_model is ChatAnswerV1 else
                 '{"decisions":[{"include":true,"personal_reason":"[FAKE] 제공된 합성 수면 기록과 관련 있어요.","category":"care"}]}')
         client = FakeLLMClient([*turns, ModelTurn(text=text)])
-        result = AgentLoopRunner(client, fake_registry()).run_structured(
+        result = AgentLoopRunner(client, fake_registry(),
+                                 prompt_builder=FeedPromptBuilder() if output_model is FeedAnswerV2 else None).run_structured(
             "[FAKE] 합성 기록과 관련 근거를 보여주세요.", context, output_model=output_model)
         print(result.model_dump_json(indent=2))
         if result.execution.status != "completed":

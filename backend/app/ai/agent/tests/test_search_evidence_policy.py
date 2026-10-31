@@ -18,7 +18,7 @@ from ..tools.contracts import EvidencePackage, EvidenceSearchInput
 from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY, SearchEvidenceHandler
 from ..workflows.chat_context_prepare import prepare_chat_input
 from ..workflows.chat_execution import ChatExecutionV1
-from ..workflows.chat_prompts import CHAT_DIALOGUE_POLICY, ChatPromptBuilder
+from ..workflows.chat_prompts import CHAT_DIALOGUE_POLICY, CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY, ChatPromptBuilder
 from ..workflows.feed_execution import FeedExecutionV1
 from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_feed_candidates import decisions, package
@@ -120,8 +120,11 @@ class SearchEvidencePolicyTests(unittest.TestCase):
             self.assertIn('진단을 확정하거나 처방/투약 변경을 지시하지 말고', initial)
         self.assertIn(CHAT_DIALOGUE_POLICY, chat)
         for rule in ('Tool 없이 직접', '명시적으로 요청했고 현재 요청에서 search_evidence가 제공된다면 해당 근거를 검색한다', '환자 ID를 생성하거나 임의 선택하지 않는다',
-                     'selected', 'citation_refs', '유형만으로 일괄 제외하지 않는다'):
+                     'selected', 'citation_refs'):
             self.assertIn(rule, chat)
+        self.assertNotIn('유형만으로 일괄 제외하지 않는다', chat)
+        self.assertIn('유형만으로 일괄 제외하지 않는다', CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY)
+        self.assertNotIn(CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY, chat)
         for rule in ('첫 검색을 반드시', '최대 3회', 'top_k는 서버가 8로 고정', 'Cold Start'):
             self.assertIn(rule, feed)
         self.assertNotIn('FeedDecisionDraft', feed)

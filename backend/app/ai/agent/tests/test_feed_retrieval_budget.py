@@ -12,6 +12,7 @@ from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceSearchInput
 from ..workflows.feed_execution import FeedExecutionV1
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_feed_candidates import decisions, package, review_turn
 from . import test_parallel_feed as parallel
 from .test_parallel_feed import calls, registry
@@ -108,7 +109,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
             searched.append(args.top_k)
             return package([f'{args.query}-{i}' for i in range(args.top_k)])
         client = FakeLLMClient(turns)
-        result = AgentLoopRunner(client, registry(handler)).run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
+        result = AgentLoopRunner(client, registry(handler), prompt_builder=FeedPromptBuilder()).run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
         self.assertEqual(result.execution.status, 'limit_reached')
         self.assertEqual(result.execution.errors[-1].code, 'tool_limit')
         self.assertEqual(searched, [8, 8, 8])

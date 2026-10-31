@@ -13,6 +13,7 @@ from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceItem, EvidencePackage
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_workflows import CONTEXT
 
 
@@ -222,7 +223,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
             return value
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE], search),))
         client = FakeLLMClient(turns)
-        runner = AgentLoopRunner(client, registry, **options)
+        runner = AgentLoopRunner(client, registry, prompt_builder=FeedPromptBuilder(), **options)
         return runner.run_structured("Synthetic background", CONTEXT, output_model=FeedAnswerV2), client, runner
 
     @staticmethod
