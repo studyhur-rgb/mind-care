@@ -11,6 +11,7 @@ from .tools.medications import PATIENT_MEDICATIONS_DATA_POLICY
 from .tools.medical_visits import PATIENT_MEDICAL_VISITS_DATA_POLICY
 from .tools.assessments import PATIENT_ASSESSMENTS_DATA_POLICY
 from .tools.patient_profile import PATIENT_PROFILE_DATA_POLICY
+from .tools.recent_care_logs import RECENT_CARE_LOGS_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -48,9 +49,12 @@ TOOL_CONTRACTS = {
                      c.PatientProfileInput, c.PatientProfileOutput,
                      data_policy=PATIENT_PROFILE_DATA_POLICY, patient_scoped=True),
         ToolContract(ToolName.RECENT_CARE_LOGS,
-                     "개인화 context가 필요할 때 trusted server Context가 지정한 현재 환자에 대해 간병인이 저장한 최근 patient_care 돌봄 기록을 읽기 전용으로 조회한다. "
-                     "반환된 기록은 간병인의 관찰·서술이며 임상적으로 검증된 사실이나 진단으로 간주하지 않는다.",
-                     c.RecentCareLogsInput, c.RecentCareLogsOutput, patient_scoped=True),
+                     "서버가 선택한 환자에 대해 간병인이 앱에 등록한 최근 patient_care 돌봄 기록을 읽기 전용으로 조회한다. "
+                     "서버가 정한 종료 시각을 기준으로 지정한 최근 N×24시간 동안의 기록을 확인·요약·비교할 때 사용한다. "
+                     "각 기록의 저장된 시각, 관찰 자유서술과 환자 기분 태그, 조회 시작·종료 시각 및 해당 조건의 전체 기록 수를 반환한다. "
+                     "반환 기록 수는 limit로 제한되며, 다른 종류의 돌봄 기록이나 공식 진료·검사 결과 자체를 조회하는 Tool은 아니다.",
+                     c.RecentCareLogsInput, c.RecentCareLogsOutput,
+                     data_policy=RECENT_CARE_LOGS_DATA_POLICY, patient_scoped=True),
         ToolContract(ToolName.SEARCH_EVIDENCE,
                      "연구·의학적 근거가 필요할 때 현재 corpus에서 치매/MCI 및 인지건강 관련 연구 근거 후보를 검색한다. "
                      "관련 의학·연구 용어를 사용한 영어 query를 가능한 한 우선 작성하도록 권장한다. "

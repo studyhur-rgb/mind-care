@@ -365,10 +365,21 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(seen, [CONTEXT])
         messages = client.requests[-1][0]
-        self.assertEqual(messages[-1].type, "function_call_output")
+        calls = [m for m in messages if m.type == "provider_output" and m.provider_output.get("type") == "function_call"]
+        outputs = [m for m in messages if m.type == "function_call_output"]
+        self.assertEqual([m.provider_output["call_id"] for m in calls], ["call_1"])
+        self.assertEqual([m.call_id for m in outputs], ["call_1"])
+        policy = TOOL_CONTRACTS[ToolName.RECENT_CARE_LOGS].data_policy
+        policies = [m for m in messages if m.role == "system" and m.kind == "policy" and m.content == policy]
+        self.assertEqual(len(policies), 1)
+        self.assertTrue(all(m.content != policy for m in client.requests[0][0]))
+        self.assertLess(messages.index(calls[0]), messages.index(outputs[0]))
+        self.assertLess(messages.index(outputs[0]), messages.index(policies[0]))
         self.assertTrue(all(narrative not in (m.content or "") and mood not in (m.content or "")
                             for m in messages if m.role == "system"))
-        log = envelopes(client)[0]["data"]["logs"][0]
+        envelope = json.loads(outputs[0].content)
+        self.assertTrue(envelope["success"])
+        log = envelope["data"]["logs"][0]
         self.assertEqual(log["content"], narrative)
         self.assertEqual(log["mood_tag"], mood)
         trusted = json.loads(messages[1].content)["trusted_agent_context"]
